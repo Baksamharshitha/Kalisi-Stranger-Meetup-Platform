@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../constants/colors.dart';
 import '../services/api_service.dart';
 import 'onboarding_quiz_screen.dart';
@@ -17,6 +18,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   Future<void> _handleStart() async {
     setState(() => _isLoading = true);
     try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_logged_out', false);
       await ApiService.instance.loginOrRegister();
       if (!mounted) return;
       Navigator.push(
@@ -37,6 +40,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   Future<void> _handleExistingUser() async {
     setState(() => _isLoading = true);
     try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_logged_out', false);
       await ApiService.instance.loginOrRegister(
         email: 'user_bangalore@kalisi.app',
         fullName: 'Rahul Verma',
@@ -47,6 +52,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         MaterialPageRoute(builder: (_) => const MainHomeScreen()),
       );
     } catch (_) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_logged_out', false);
       if (!mounted) return;
       Navigator.pushReplacement(
         context,

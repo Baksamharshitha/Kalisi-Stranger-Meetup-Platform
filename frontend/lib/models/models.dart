@@ -1,22 +1,31 @@
 class QuizQuestion {
   final String id;
   final String question;
+  final String subtitle;
   final String highlight;
+  final String type;
   final List<String> options;
+  final String category;
 
   QuizQuestion({
     required this.id,
     required this.question,
-    required this.highlight,
+    this.subtitle = '',
+    this.highlight = '',
+    this.type = 'single_choice',
     required this.options,
+    this.category = 'vibe',
   });
 
   factory QuizQuestion.fromJson(Map<String, dynamic> json) {
     return QuizQuestion(
       id: json['id'] ?? '',
       question: json['question'] ?? '',
+      subtitle: json['subtitle'] ?? '',
       highlight: json['highlight'] ?? '',
+      type: json['type'] ?? 'single_choice',
       options: List<String>.from(json['options'] ?? []),
+      category: json['category'] ?? 'vibe',
     );
   }
 }
@@ -49,6 +58,7 @@ class VibeDNAResult {
 
 class CitySlot {
   final String id;
+  final String title;
   final String city;
   final String dateStr;
   final String timeWindow;
@@ -57,9 +67,15 @@ class CitySlot {
   final int maxCapacity;
   final int seatsLeft;
   final bool isBookedByUser;
+  final bool isEnabled;
+  final String venueName;
+  final String venueAddress;
+  final String aboutEvent;
+  final String rulesAndRegulations;
 
   CitySlot({
     required this.id,
+    this.title = 'Weekend Stranger Dinner Meetup',
     required this.city,
     required this.dateStr,
     required this.timeWindow,
@@ -68,11 +84,17 @@ class CitySlot {
     this.maxCapacity = 10,
     this.seatsLeft = 5,
     required this.isBookedByUser,
+    this.isEnabled = true,
+    this.venueName = 'Curated Partner Restaurant',
+    this.venueAddress = 'Central City Location',
+    this.aboutEvent = 'Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games.',
+    this.rulesAndRegulations = '1. Arrive within 15 minutes of start time.\n2. Equal bill splitting for food & drinks.\n3. Keep phone away and enjoy real conversations.\n4. Age 18+ verified diners only.',
   });
 
   factory CitySlot.fromJson(Map<String, dynamic> json) {
     return CitySlot(
       id: json['id'] ?? '',
+      title: json['title'] ?? 'Weekend Stranger Dinner Meetup',
       city: json['city'] ?? '',
       dateStr: json['date_str'] ?? '',
       timeWindow: json['time_window'] ?? '',
@@ -81,6 +103,11 @@ class CitySlot {
       maxCapacity: json['max_capacity'] ?? 10,
       seatsLeft: json['seats_left'] ?? 5,
       isBookedByUser: json['is_booked_by_user'] ?? false,
+      isEnabled: json['is_enabled'] ?? (json['status'] == 'open'),
+      venueName: json['venue_name'] ?? 'Curated Partner Restaurant',
+      venueAddress: json['venue_address'] ?? 'Central City Location',
+      aboutEvent: json['about_event'] ?? 'Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games.',
+      rulesAndRegulations: json['rules_and_regulations'] ?? '1. Arrive within 15 minutes of start time.\n2. Equal bill splitting for food & drinks.\n3. Keep phone away and enjoy real conversations.\n4. Age 18+ verified diners only.',
     );
   }
 }

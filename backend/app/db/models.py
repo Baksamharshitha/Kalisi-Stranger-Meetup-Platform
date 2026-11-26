@@ -14,6 +14,9 @@ class User(Base):
     full_name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
+    age = Column(Integer, nullable=True)
+    gender = Column(String, nullable=True)
+    is_phone_verified = Column(Boolean, default=False)
     hashed_password = Column(String, nullable=False)
     city = Column(String, default="Chennai", index=True)
     is_verified = Column(Boolean, default=True)
@@ -71,13 +74,21 @@ class CitySlot(Base):
     __tablename__ = "city_slots"
 
     id = Column(String, primary_key=True, default=generate_uuid)
+    title = Column(String, default="Weekend Stranger Dinner Meetup")
     city = Column(String, index=True, nullable=False)
     date_str = Column(String, nullable=False)  # e.g., "Sat, 11/28/2026"
     time_window = Column(String, nullable=False)  # e.g., "19:00 - 22:00"
     price_inr = Column(Integer, default=499)
     max_capacity = Column(Integer, default=10)  # Total seats available (e.g., 2 tables of 5)
     event_timestamp = Column(DateTime, nullable=False)
-    status = Column(String, default="open")  # open, closed, completed
+    status = Column(String, default="open")  # open, disabled, completed
+    is_enabled = Column(Boolean, default=True)
+
+    # Merged Venue & Event Details
+    venue_name = Column(String, default="Curated Partner Restaurant")
+    venue_address = Column(Text, default="Central City Location")
+    about_event = Column(Text, default="Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games.")
+    rules_and_regulations = Column(Text, default="1. Arrive within 15 minutes of start time.\n2. Equal bill splitting for food & drinks.\n3. Keep phone away and enjoy real conversations.\n4. Age 18+ verified diners only.")
 
     tables = relationship("TableGroup", back_populates="slot")
     bookings = relationship("Booking", back_populates="slot")
@@ -125,5 +136,19 @@ class TableFeedback(Base):
     vibe_rating = Column(Integer, nullable=False)  # 1-5
     food_rating = Column(Integer, nullable=False)  # 1-5
     comments = Column(Text, nullable=True)
-    peer_badges = Column(String, nullable=True)
+
+class VideoReel(Base):
+    __tablename__ = "video_reels"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    title = Column(String, nullable=False)
+    venue_name = Column(String, nullable=False)
+    video_url = Column(String, nullable=False)
+    thumbnail_url = Column(String, nullable=True)
+    views_count = Column(Integer, default=1200)
+    uploader_user_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    is_approved = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    uploader = relationship("User")
+

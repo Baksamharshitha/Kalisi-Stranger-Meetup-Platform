@@ -3,7 +3,7 @@ from fastapi import APIRouter, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.db.models import User, CitySlot, TableGroup, Restaurant, Booking
+from app.db.models import User, CitySlot, TableGroup, Restaurant, Booking, VideoReel
 from app.services.matchmaking import cluster_slot_into_tables
 
 admin_router = APIRouter()
@@ -30,10 +30,11 @@ def admin_login(username: str = Form(...), password: str = Form(...)):
 def admin_get_overview():
     with SessionLocal() as db:
         users = db.query(User).all()
-        slots = db.query(CitySlot).all()
+        slots = db.query(CitySlot).order_by(CitySlot.event_timestamp.desc()).all()
         tables = db.query(TableGroup).all()
         restaurants = db.query(Restaurant).all()
-        bookings = db.query(Booking).all()
+        bookings = db.query(Booking).order_by(Booking.created_at.desc()).all()
+        videos = db.query(VideoReel).order_by(VideoReel.created_at.desc()).all()
 
         # Users with Vibe DNA and Preferences
         user_list = []
@@ -47,56 +48,35 @@ def admin_get_overview():
                 "name": u.full_name,
                 "email": u.email,
                 "phone": u.phone or "N/A",
+                "age": u.age or 24,
+                "gender": u.gender or "N/A",
                 "city": u.city,
                 "archetype": arch,
                 "icebreaker_style": icebreaker,
                 "budget_tier": tier,
                 "dietary": diet,
+                "bookings_count": len(u.bookings),
                 "is_verified": u.is_verified,
                 "created_at": u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "Recent",
             })
 
-        # Detailed Tables
-        table_list = []
-        for t in tables:
-            attendees = []
-            for b in t.bookings:
-                if b.user:
-                    u_arch = b.user.personality.archetype if b.user.personality else "Clark Kent"
-                    u_tier = b.user.preferences.budget_tier if b.user.preferences else "mid_range"
-                    attendees.append({
-                        "name": b.user.full_name,
-                        "email": b.user.email,
-                        "archetype": u_arch,
-                        "budget_tier": u_tier,
-                        "payment_status": b.payment_status,
-                        "attendance_confirmed": b.attendance_confirmed,
-                    })
-
-            table_list.append({
-                "id": t.id,
-                "table_number": t.table_number,
-                "slot_id": t.slot_id,
-                "date_str": t.slot.date_str if t.slot else "",
-                "city": t.slot.city if t.slot else "",
-                "time_window": t.slot.time_window if t.slot else "",
-                "restaurant_name": t.restaurant.name if t.restaurant else "Unassigned",
-                "neighborhood": t.restaurant.neighborhood if t.restaurant else "",
-                "reveal_stage": t.reveal_stage,
-                "archetype_summary": t.archetype_summary or "Clustering in progress",
-                "attendees": attendees,
-                "attendee_count": len(attendees),
-                "target_size": t.target_size,
-                "seats_available": max(0, t.target_size - len(attendees)),
-            })
-
-        # Detailed City Slots with Capacity
+        # Detailed Slots / Events
         slot_list = []
+        active_events_count = 0
+        completed_events_count = 0
+
         for s in slots:
             booked_count = len(s.bookings)
             capacity = s.max_capacity or 10
+            is_completed = s.status == "completed"
+            if is_completed:
+                completed_events_count += 1
+            else:
+                active_events_count += 1
+
             slot_list.append({
                 "id": s.id,
+                "title": getattr(s, "title", None) or f"{s.city} Stranger Dinner Meetup",
                 "city": s.city,
                 "date_str": s.date_str,
                 "time_window": s.time_window,
@@ -105,7 +85,50 @@ def admin_get_overview():
                 "bookings_count": booked_count,
                 "seats_left": max(0, capacity - booked_count),
                 "status": s.status,
+                "is_enabled": (s.status == "open"),
+                "venue_name": getattr(s, "venue_name", None) or "Curated Partner Restaurant",
+                "venue_address": getattr(s, "venue_address", None) or f"Central {s.city} Location",
+                "about_event": getattr(s, "about_event", None) or "Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games.",
+                "rules_and_regulations": getattr(s, "rules_and_regulations", None) or "1. Arrive on time.\n2. Equal bill split.\n3. Respectful table talk.\n4. Age 18+ only.",
                 "tables_count": len(s.tables),
+            })
+
+        # Detailed Bookings & Financial Ledger
+        booking_list = []
+        total_revenue = 0
+        paid_count = 0
+
+        for b in bookings:
+            amt = b.amount_paid or 0
+            total_revenue += amt
+            if b.payment_status == "paid":
+                paid_count += 1
+
+            u = b.user
+            arch = u.personality.archetype if (u and u.personality) else "Clark Kent"
+            diet = u.preferences.dietary_requirements if (u and u.preferences) else "No restrictions"
+
+            booking_list.append({
+                "id": b.id,
+                "slot_id": b.slot_id,
+                "user_id": b.user_id,
+                "user_name": u.full_name if u else "Unknown",
+                "user_email": u.email if u else "N/A",
+                "user_phone": u.phone if u else "N/A",
+                "user_age": u.age if u else 24,
+                "user_gender": u.gender if u else "N/A",
+                "user_archetype": arch,
+                "user_dietary": diet,
+                "slot_city": b.slot.city if b.slot else "",
+                "slot_date": b.slot.date_str if b.slot else "",
+                "slot_time": b.slot.time_window if b.slot else "",
+                "table_number": b.table.table_number if b.table else None,
+                "amount_paid": amt,
+                "payment_status": b.payment_status,
+                "payment_method": b.payment_method or "Free Trial",
+                "payment_id": b.payment_id or "N/A",
+                "attendance_confirmed": b.attendance_confirmed,
+                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "N/A",
             })
 
         # Detailed Venues
@@ -126,74 +149,120 @@ def admin_get_overview():
                 "contact_phone": r.contact_phone or "N/A",
             })
 
-        # Detailed Bookings & Financial Ledger
-        booking_list = []
-        total_revenue = 0
-        paid_count = 0
-        free_trial_count = 0
-
-        for b in bookings:
-            amt = b.amount_paid or 0
-            total_revenue += amt
-            if b.payment_status == "paid":
-                paid_count += 1
-            else:
-                free_trial_count += 1
-
-            booking_list.append({
-                "id": b.id,
-                "user_name": b.user.full_name if b.user else "Unknown",
-                "user_email": b.user.email if b.user else "N/A",
-                "slot_city": b.slot.city if b.slot else "",
-                "slot_date": b.slot.date_str if b.slot else "",
-                "slot_time": b.slot.time_window if b.slot else "",
-                "table_number": b.table.table_number if b.table else None,
-                "amount_paid": amt,
-                "payment_status": b.payment_status,
-                "payment_method": b.payment_method or "Free Trial",
-                "payment_id": b.payment_id or "N/A",
-                "attendance_confirmed": b.attendance_confirmed,
-                "created_at": b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "N/A",
+        # Detailed Videos
+        video_list = []
+        for v in videos:
+            video_list.append({
+                "id": v.id,
+                "title": v.title,
+                "venue_name": v.venue_name,
+                "video_url": v.video_url,
+                "thumbnail_url": v.thumbnail_url or "https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80",
+                "views_count": v.views_count,
+                "created_at": v.created_at.strftime("%Y-%m-%d") if v.created_at else "Recent",
             })
 
         return {
             "metrics": {
                 "total_users": len(users),
-                "active_slots": len(slots),
-                "total_tables": len(tables),
-                "total_bookings": len(bookings),
-                "total_restaurants": len(restaurants),
+                "event_booked_members": len(bookings),
+                "active_events": active_events_count,
+                "completed_events": completed_events_count,
                 "total_revenue_inr": total_revenue,
                 "paid_bookings": paid_count,
-                "free_trials": free_trial_count,
+                "total_videos": len(videos),
+                "total_venues": len(restaurants),
+                "active_tables": len(tables),
             },
-            "tables": table_list,
+            "events": slot_list,
             "slots": slot_list,
             "restaurants": restaurant_list,
             "bookings": booking_list,
             "users": user_list,
+            "videos": video_list,
         }
 
-@admin_router.post("/admin/api/matchmake")
-def admin_trigger_matchmaking():
+@admin_router.post("/admin/api/events/{event_id}/status")
+def admin_set_event_status(event_id: str, status: str = Form(...)):
     with SessionLocal() as db:
-        slots = db.query(CitySlot).filter(CitySlot.status == "open").all()
-        clustered = 0
-        for s in slots:
-            cluster_slot_into_tables(db, s.id)
-            clustered += 1
-        return {"status": "success", "message": f"Matchmaking worker clustered available bookings for {clustered} city slots."}
+        slot = db.query(CitySlot).filter(CitySlot.id == event_id).first()
+        if not slot:
+            raise HTTPException(status_code=404, detail="Event not found")
+        slot.status = status
+        db.commit()
+        return {"status": "success", "event_id": slot.id, "new_status": slot.status}
+
+@admin_router.post("/admin/api/events/{event_id}/toggle-enable")
+def admin_toggle_event_enable(event_id: str):
+    with SessionLocal() as db:
+        slot = db.query(CitySlot).filter(CitySlot.id == event_id).first()
+        if not slot:
+            raise HTTPException(status_code=404, detail="Event not found")
+        # Toggle between open (enabled) and disabled
+        if slot.status == "open":
+            slot.status = "disabled"
+            slot.is_enabled = False
+        else:
+            slot.status = "open"
+            slot.is_enabled = True
+        db.commit()
+        return {"status": "success", "event_id": slot.id, "new_status": slot.status, "is_enabled": slot.is_enabled}
+
+@admin_router.post("/admin/api/bookings/{booking_id}/toggle-attendance")
+def admin_toggle_attendance(booking_id: str):
+    with SessionLocal() as db:
+        booking = db.query(Booking).filter(Booking.id == booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        booking.attendance_confirmed = not booking.attendance_confirmed
+        db.commit()
+        return {"status": "success", "booking_id": booking.id, "attended": booking.attendance_confirmed}
+
+@admin_router.post("/admin/api/videos/create")
+def admin_create_video(
+    title: str = Form(...),
+    venue_name: str = Form(...),
+    video_url: str = Form(...),
+    thumbnail_url: str = Form("https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=800&q=80")
+):
+    with SessionLocal() as db:
+        vr = VideoReel(
+            title=title,
+            venue_name=venue_name,
+            video_url=video_url,
+            thumbnail_url=thumbnail_url,
+            views_count=1000,
+            is_approved=True
+        )
+        db.add(vr)
+        db.commit()
+        return {"status": "success", "video_id": vr.id}
+
+@admin_router.delete("/admin/api/videos/{video_id}")
+def admin_delete_video(video_id: str):
+    with SessionLocal() as db:
+        vr = db.query(VideoReel).filter(VideoReel.id == video_id).first()
+        if vr:
+            db.delete(vr)
+            db.commit()
+        return {"status": "success"}
 
 @admin_router.post("/admin/api/slots/create")
 def admin_create_slot(
+    title: str = Form("Weekend Stranger Dinner Meetup"),
     city: str = Form(...),
     date_str: str = Form(...),
     time_window: str = Form(...),
-    price_inr: int = Form(499),
-    max_capacity: int = Form(10)
+    price_inr: int = Form(599),
+    max_capacity: int = Form(10),
+    venue_name: str = Form("Curated Partner Restaurant"),
+    venue_address: str = Form("Central City Location"),
+    about_event: str = Form("Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games."),
+    rules_and_regulations: str = Form("1. Arrive within 15 minutes of start time.\n2. Equal bill splitting for food & drinks.\n3. Keep phone away and enjoy real conversations.\n4. Age 18+ verified diners only.")
 ):
     with SessionLocal() as db:
         new_slot = CitySlot(
+            title=title,
             city=city,
             date_str=date_str,
             time_window=time_window,
@@ -201,10 +270,56 @@ def admin_create_slot(
             max_capacity=max_capacity,
             event_timestamp=datetime.utcnow() + timedelta(days=7),
             status="open",
+            is_enabled=True,
+            venue_name=venue_name,
+            venue_address=venue_address,
+            about_event=about_event,
+            rules_and_regulations=rules_and_regulations
         )
         db.add(new_slot)
         db.commit()
         return {"status": "success", "slot_id": new_slot.id}
+
+@admin_router.post("/admin/api/events/{event_id}/update")
+def admin_update_event(
+    event_id: str,
+    title: str = Form(...),
+    city: str = Form(...),
+    date_str: str = Form(...),
+    time_window: str = Form(...),
+    price_inr: int = Form(...),
+    max_capacity: int = Form(...),
+    venue_name: str = Form(...),
+    venue_address: str = Form(...),
+    about_event: str = Form(...),
+    rules_and_regulations: str = Form(...),
+    status: str = Form("open")
+):
+    with SessionLocal() as db:
+        slot = db.query(CitySlot).filter(CitySlot.id == event_id).first()
+        if not slot:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        slot.title = title
+        slot.city = city
+        slot.date_str = date_str
+        slot.time_window = time_window
+        slot.price_inr = price_inr
+        slot.max_capacity = max_capacity
+        slot.venue_name = venue_name
+        slot.venue_address = venue_address
+        slot.about_event = about_event
+        slot.rules_and_regulations = rules_and_regulations
+        slot.status = status
+        slot.is_enabled = (status == "open")
+        
+        db.commit()
+        return {
+            "status": "success",
+            "event_id": slot.id,
+            "message": "Event and venue details updated successfully",
+            "is_enabled": slot.is_enabled
+        }
 
 @admin_router.post("/admin/api/restaurants/create")
 def admin_create_restaurant(
@@ -238,20 +353,8 @@ def admin_create_restaurant(
         db.commit()
         return {"status": "success", "restaurant_id": restaurant.id}
 
-@admin_router.post("/admin/api/tables/{table_id}/set-stage")
-def admin_set_reveal_stage(table_id: str, stage: str = Form(...)):
-    if stage not in ["locked", "area_revealed", "fully_revealed"]:
-        raise HTTPException(status_code=400, detail="Invalid reveal stage")
-    with SessionLocal() as db:
-        table = db.query(TableGroup).filter(TableGroup.id == table_id).first()
-        if not table:
-            raise HTTPException(status_code=404, detail="Table not found")
-        table.reveal_stage = stage
-        db.commit()
-        return {"status": "success", "table_id": table.id, "new_stage": table.reveal_stage}
-
 # ==============================================================================
-# Complete Admin Web UI (HTML + Tailwind + Sidebar + Auth Modal)
+# Complete Admin Web UI (HTML + Tailwind + Sidebar + Dedicated Tab Views)
 # ==============================================================================
 
 ADMIN_HTML = """<!DOCTYPE html>
@@ -295,49 +398,10 @@ ADMIN_HTML = """<!DOCTYPE html>
 <body class="min-h-screen flex bg-kalisi-bg overflow-x-hidden">
 
   <!-- ======================================================================= -->
-  <!-- 1. AUTH LOGIN OVERLAY (Shows when not authenticated)                    -->
-  <!-- ======================================================================= -->
-  <div id="auth-overlay" class="fixed inset-0 bg-black/90 backdrop-blur-md z-[100] flex items-center justify-center p-4">
-    <div class="glass-card bg-kalisi-surface max-w-md w-full p-8 rounded-3xl border border-kalisi-border shadow-2xl space-y-6">
-      <div class="text-center space-y-2">
-        <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-kalisi-gold/20 border border-kalisi-gold/40 text-kalisi-gold text-2xl font-black mb-1">
-          K
-        </div>
-        <h2 class="text-2xl font-black text-white tracking-tight">Kalisi Admin Portal</h2>
-        <p class="text-xs text-gray-400">Restricted access for platform organizers & operations.</p>
-      </div>
-
-      <div id="login-error" class="hidden p-3 rounded-xl bg-kalisi-crimson/20 border border-kalisi-crimson/50 text-xs font-bold text-red-300"></div>
-
-      <form onsubmit="handleLogin(event)" class="space-y-4">
-        <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Admin Username</label>
-          <div class="relative">
-            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-gray-400"><i class="fas fa-user-shield text-sm"></i></span>
-            <input type="text" id="login-username" value="admin" required class="w-full bg-kalisi-surfaceLight pl-10 pr-4 py-3 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold transition">
-          </div>
-        </div>
-        <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Password</label>
-          <div class="relative">
-            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center text-gray-400"><i class="fas fa-key text-sm"></i></span>
-            <input type="password" id="login-password" value="kalisi_admin_2026" required class="w-full bg-kalisi-surfaceLight pl-10 pr-4 py-3 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold transition">
-          </div>
-          <span class="text-[11px] text-gray-500 mt-1 block">Default: admin / kalisi_admin_2026</span>
-        </div>
-        <button type="submit" class="w-full py-3.5 rounded-xl bg-kalisi-gold text-black font-extrabold text-sm hover:brightness-110 active:scale-95 transition flex items-center justify-center space-x-2">
-          <span>Sign In to Control Center</span>
-          <i class="fas fa-arrow-right text-xs"></i>
-        </button>
-      </form>
-    </div>
-  </div>
-
-  <!-- ======================================================================= -->
-  <!-- 2. SIDEBAR NAVIGATION                                                   -->
+  <!-- SIDEBAR NAVIGATION                                                      -->
   <!-- ======================================================================= -->
   <aside class="w-64 bg-kalisi-sidebar border-r border-kalisi-border flex flex-col justify-between shrink-0 min-h-screen sticky top-0">
-    <div class="p-6 space-y-8">
+    <div class="p-6 space-y-7">
       
       <!-- Brand & Status -->
       <div class="flex items-center justify-between">
@@ -347,7 +411,7 @@ ADMIN_HTML = """<!DOCTYPE html>
           </div>
           <div>
             <h1 class="text-lg font-black tracking-tight text-white leading-none">Kalisi</h1>
-            <span class="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Stranger Meetups</span>
+            <span class="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Mission Control</span>
           </div>
         </div>
         <span class="flex h-2.5 w-2.5 relative">
@@ -360,46 +424,37 @@ ADMIN_HTML = """<!DOCTYPE html>
       <nav class="space-y-1.5" id="sidebar-nav">
         <a href="/admin/overview" onclick="return navigateTab('overview', '/admin/overview')" id="nav-btn-overview" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-bold bg-kalisi-gold/15 text-kalisi-gold border border-kalisi-gold/30 transition">
           <i class="fas fa-chart-pie w-5 text-center"></i>
-          <span>Overview & KPIs</span>
+          <span>Overview</span>
         </a>
 
-        <a href="/admin/tables" onclick="return navigateTab('tables', '/admin/tables')" id="nav-btn-tables" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
-          <i class="fas fa-users-viewfinder w-5 text-center"></i>
-          <span>5-Stranger Tables</span>
+        <a href="/admin/users" onclick="return navigateTab('users', '/admin/users')" id="nav-btn-users" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
+          <i class="fas fa-users w-5 text-center"></i>
+          <span>Users Directory</span>
         </a>
 
-        <a href="/admin/slots" onclick="return navigateTab('slots', '/admin/slots')" id="nav-btn-slots" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
+        <a href="/admin/events" onclick="return navigateTab('events', '/admin/events')" id="nav-btn-events" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
           <i class="fas fa-calendar-check w-5 text-center"></i>
-          <span>Weekend Slots</span>
+          <span>Events List</span>
         </a>
 
-        <a href="/admin/bookings" onclick="return navigateTab('bookings', '/admin/bookings')" id="nav-btn-bookings" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
-          <i class="fas fa-ticket w-5 text-center"></i>
-          <span>Bookings & Members</span>
-        </a>
-
-        <a href="/admin/venues" onclick="return navigateTab('venues', '/admin/venues')" id="nav-btn-venues" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
-          <i class="fas fa-utensils w-5 text-center"></i>
-          <span>Verified Venues</span>
+        <a href="/admin/event-bookings" onclick="return navigateTab('event-bookings', '/admin/event-bookings')" id="nav-btn-event-bookings" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
+          <i class="fas fa-clipboard-user w-5 text-center"></i>
+          <span>Event Bookings</span>
         </a>
 
         <a href="/admin/payments" onclick="return navigateTab('payments', '/admin/payments')" id="nav-btn-payments" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
           <i class="fas fa-indian-rupee-sign w-5 text-center"></i>
-          <span>Payments & Revenue</span>
+          <span>Payments</span>
         </a>
 
-        <a href="/admin/vibe-dna" onclick="return navigateTab('users', '/admin/vibe-dna')" id="nav-btn-users" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
-          <i class="fas fa-fingerprint w-5 text-center"></i>
-          <span>User Vibe DNA</span>
+        <a href="/admin/videos" onclick="return navigateTab('videos', '/admin/videos')" id="nav-btn-videos" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
+          <i class="fas fa-play-circle w-5 text-center"></i>
+          <span>Videos & Reels</span>
         </a>
       </nav>
 
       <!-- Quick Actions -->
       <div class="pt-4 border-t border-kalisi-border space-y-2">
-        <button onclick="triggerMatchmaking()" class="w-full py-2.5 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 active:scale-95 transition flex items-center justify-center space-x-2">
-          <i class="fas fa-bolt"></i>
-          <span>Run Matchmaker</span>
-        </button>
         <a href="/api/docs" target="_blank" class="w-full py-2 rounded-xl bg-kalisi-surface border border-kalisi-border hover:border-gray-500 text-xs font-bold text-gray-300 hover:text-white text-center block transition">
           <i class="fas fa-code mr-1.5"></i> Swagger API Docs
         </a>
@@ -424,677 +479,582 @@ ADMIN_HTML = """<!DOCTYPE html>
   </aside>
 
   <!-- ======================================================================= -->
-  <!-- 3. MAIN DASHBOARD CONTENT AREA                                         -->
+  <!-- MAIN CONTENT AREA                                                       -->
   <!-- ======================================================================= -->
   <main class="flex-1 min-w-0 p-8 space-y-8 overflow-y-auto max-h-screen">
 
     <!-- TAB 1: OVERVIEW & KPIS -->
-    <div id="tab-overview" class="space-y-8">
-      <div class="flex justify-between items-center">
+    <section id="tab-overview" class="space-y-8">
+      <div class="flex items-center justify-between">
         <div>
-          <h2 class="text-2xl font-black tracking-tight text-white">Mission Control Overview</h2>
-          <p class="text-xs text-gray-400 mt-1">Real-time status of strangers, weekend gatherings, and revenue.</p>
+          <h2 class="text-2xl font-black tracking-tight text-white">Platform Overview</h2>
+          <p class="text-xs text-gray-400">Real-time pulse of Kalisi dinner meetups across all active cities.</p>
         </div>
-        <button onclick="loadData()" class="px-3.5 py-1.5 rounded-xl bg-kalisi-surface border border-kalisi-border hover:border-kalisi-gold text-xs font-bold text-gray-300 hover:text-white transition flex items-center space-x-1.5">
-          <i class="fas fa-rotate"></i>
-          <span>Refresh Data</span>
+        <button onclick="loadData()" class="px-4 py-2 rounded-xl bg-kalisi-surfaceLight border border-kalisi-border text-xs font-bold text-gray-300 hover:text-white hover:border-kalisi-gold transition flex items-center space-x-2">
+          <i class="fas fa-arrows-rotate"></i>
+          <span>Refresh Live Data</span>
         </button>
       </div>
 
-      <!-- KPI Bar -->
-      <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Total Members</span>
-          <span class="text-3xl font-black text-white mt-2" id="kpi-users">-</span>
+      <!-- Core Stat Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <div class="glass-card p-5 rounded-2xl space-y-2 border-l-4 border-l-kalisi-gold">
+          <div class="flex items-center justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+            <span>Total Users</span>
+            <i class="fas fa-users text-kalisi-gold"></i>
+          </div>
+          <div class="text-3xl font-black text-white" id="stat-total-users">0</div>
+          <p class="text-[11px] text-gray-400">Registered on mobile</p>
         </div>
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Active Slots</span>
-          <span class="text-3xl font-black text-kalisi-gold mt-2" id="kpi-slots">-</span>
+
+        <div class="glass-card p-5 rounded-2xl space-y-2 border-l-4 border-l-kalisi-purple">
+          <div class="flex items-center justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+            <span>Event Booked Members</span>
+            <i class="fas fa-ticket text-kalisi-purple"></i>
+          </div>
+          <div class="text-3xl font-black text-white" id="stat-booked-members">0</div>
+          <p class="text-[11px] text-gray-400">Total seat reservations</p>
         </div>
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">5-Stranger Tables</span>
-          <span class="text-3xl font-black text-kalisi-purple mt-2" id="kpi-tables">-</span>
+
+        <div class="glass-card p-5 rounded-2xl space-y-2 border-l-4 border-l-green-500">
+          <div class="flex items-center justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+            <span>Active Events</span>
+            <i class="fas fa-calendar-check text-green-400"></i>
+          </div>
+          <div class="text-3xl font-black text-white" id="stat-active-events">0</div>
+          <p class="text-[11px] text-green-400 font-semibold">Open for booking now</p>
         </div>
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Seat Bookings</span>
-          <span class="text-3xl font-black text-kalisi-blue mt-2" id="kpi-bookings">-</span>
-        </div>
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Partner Venues</span>
-          <span class="text-3xl font-black text-green-400 mt-2" id="kpi-venues">-</span>
-        </div>
-        <div class="glass-card p-5 rounded-2xl flex flex-col justify-between">
-          <span class="text-[11px] text-gray-400 uppercase font-bold tracking-wider">Total Revenue</span>
-          <span class="text-3xl font-black text-kalisi-gold mt-2" id="kpi-revenue">₹0</span>
+
+        <div class="glass-card p-5 rounded-2xl space-y-2 border-l-4 border-l-blue-400">
+          <div class="flex items-center justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+            <span>Completed Events</span>
+            <i class="fas fa-flag-checkered text-blue-400"></i>
+          </div>
+          <div class="text-3xl font-black text-white" id="stat-completed-events">0</div>
+          <p class="text-[11px] text-gray-400">Past successful dinners</p>
         </div>
       </div>
 
-      <!-- Quick Glance Grid -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <!-- Recent Tables -->
-        <div class="glass-card rounded-2xl p-6 space-y-4">
-          <div class="flex justify-between items-center">
-            <h3 class="text-base font-black text-white">Active 5-Stranger Tables</h3>
-            <button onclick="switchTab('tables')" class="text-xs text-kalisi-gold font-bold hover:underline">View All &rarr;</button>
+      <!-- Secondary Metrics -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <div class="glass-card p-5 rounded-2xl flex items-center justify-between">
+          <div>
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-1">Total Platform Revenue</span>
+            <div class="text-2xl font-black text-kalisi-gold" id="stat-total-revenue">₹0</div>
           </div>
-          <div id="overview-tables-summary" class="space-y-3">
-            <!-- Rendered by JS -->
+          <div class="w-12 h-12 rounded-xl bg-kalisi-gold/20 flex items-center justify-center text-kalisi-gold text-xl">
+            <i class="fas fa-indian-rupee-sign"></i>
           </div>
         </div>
 
-        <!-- Recent Bookings -->
-        <div class="glass-card rounded-2xl p-6 space-y-4">
-          <div class="flex justify-between items-center">
-            <h3 class="text-base font-black text-white">Latest Seat Bookings</h3>
-            <button onclick="switchTab('bookings')" class="text-xs text-kalisi-gold font-bold hover:underline">View All &rarr;</button>
+        <div class="glass-card p-5 rounded-2xl flex items-center justify-between">
+          <div>
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-1">Dinner Reels & Videos</span>
+            <div class="text-2xl font-black text-kalisi-purple" id="stat-total-videos">0</div>
           </div>
-          <div id="overview-bookings-summary" class="space-y-3">
-            <!-- Rendered by JS -->
+          <div class="w-12 h-12 rounded-xl bg-kalisi-purple/20 flex items-center justify-center text-kalisi-purple text-xl">
+            <i class="fas fa-play-circle"></i>
+          </div>
+        </div>
+
+        <div class="glass-card p-5 rounded-2xl flex items-center justify-between">
+          <div>
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-1">Partner Venues</span>
+            <div class="text-2xl font-black text-green-400" id="stat-total-venues">0</div>
+          </div>
+          <div class="w-12 h-12 rounded-xl bg-green-500/20 flex items-center justify-center text-green-400 text-xl">
+            <i class="fas fa-utensils"></i>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- TAB 2: 5-STRANGER TABLES & PROGRESSIVE REVEAL -->
-    <div id="tab-tables" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
+      <!-- Quick Snapshot: Live Events & Recent Bookings -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-2">
+        <!-- Live Upcoming Events Card -->
+        <div class="glass-card p-6 rounded-2xl space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-black text-white flex items-center gap-2">
+              <i class="fas fa-calendar-check text-kalisi-gold"></i>
+              <span>Active Upcoming Dinner Slots</span>
+            </h3>
+            <a href="/admin/events" onclick="return navigateTab('events', '/admin/events')" class="text-xs text-kalisi-gold hover:underline font-bold">Manage All →</a>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="text-gray-400 uppercase tracking-wider border-b border-kalisi-border bg-kalisi-surfaceLight/50">
+                <tr>
+                  <th class="px-3 py-2.5">Event</th>
+                  <th class="px-3 py-2.5">Date & Time</th>
+                  <th class="px-3 py-2.5">Price</th>
+                  <th class="px-3 py-2.5">Bookings</th>
+                </tr>
+              </thead>
+              <tbody id="overview-events-tbody" class="divide-y divide-kalisi-border/50 text-gray-300"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Recent Bookings Feed Card -->
+        <div class="glass-card p-6 rounded-2xl space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-black text-white flex items-center gap-2">
+              <i class="fas fa-receipt text-kalisi-purple"></i>
+              <span>Recent Dinner Bookings Activity</span>
+            </h3>
+            <a href="/admin/event-bookings" onclick="return navigateTab('event-bookings', '/admin/event-bookings')" class="text-xs text-kalisi-purple hover:underline font-bold">View Ledger →</a>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="text-gray-400 uppercase tracking-wider border-b border-kalisi-border bg-kalisi-surfaceLight/50">
+                <tr>
+                  <th class="px-3 py-2.5">Member</th>
+                  <th class="px-3 py-2.5">Event</th>
+                  <th class="px-3 py-2.5">Paid</th>
+                  <th class="px-3 py-2.5">Status</th>
+                </tr>
+              </thead>
+              <tbody id="overview-bookings-tbody" class="divide-y divide-kalisi-border/50 text-gray-300"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: USERS DIRECTORY -->
+    <section id="tab-users" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
         <div>
-          <h2 class="text-2xl font-black text-white">5-Stranger Tables & Progressive Reveal</h2>
-          <p class="text-xs text-gray-400 mt-1">Control the reveal state: <b>Locked (T > 24h)</b> &rarr; <b>Neighborhood Area (T - 24h)</b> &rarr; <b>Full Reveal (Day-Of)</b></p>
-        </div>
-        <button onclick="triggerMatchmaking()" class="px-4 py-2 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 transition flex items-center space-x-1.5">
-          <i class="fas fa-bolt"></i>
-          <span>Re-cluster Tables</span>
-        </button>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="tables-full-container">
-        <!-- Rendered by JS -->
-      </div>
-    </div>
-
-    <!-- TAB 3: WEEKEND SLOTS & CAPACITY -->
-    <div id="tab-slots" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="text-2xl font-black text-white">City Weekend Dinner Slots</h2>
-          <p class="text-xs text-gray-400 mt-1">Monitor capacity limits, ticket pricing, and open seat inventories.</p>
-        </div>
-        <button onclick="document.getElementById('modal-new-slot').classList.remove('hidden')" class="px-4 py-2 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 transition">
-          + Schedule Weekend Slot
-        </button>
-      </div>
-
-      <div class="glass-card rounded-2xl overflow-hidden">
-        <table class="min-w-full divide-y divide-kalisi-border text-left text-sm">
-          <thead class="bg-kalisi-surfaceLight/60 text-gray-400 text-xs uppercase font-bold">
-            <tr>
-              <th class="px-6 py-4">City</th>
-              <th class="px-6 py-4">Date String</th>
-              <th class="px-6 py-4">Time Window</th>
-              <th class="px-6 py-4">Slot Price</th>
-              <th class="px-6 py-4">Capacity & Filled</th>
-              <th class="px-6 py-4">Seats Left</th>
-              <th class="px-6 py-4">Status</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-kalisi-border" id="slots-tbody">
-            <!-- Rendered by JS -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- TAB 4: BOOKINGS & MEMBER DIRECTORY -->
-    <div id="tab-bookings" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="text-2xl font-black text-white">Bookings & Member Directory</h2>
-          <p class="text-xs text-gray-400 mt-1">Detailed audit of all reserved seats, member contacts, payment methods, and table assignments.</p>
-        </div>
-      </div>
-
-      <div class="glass-card rounded-2xl overflow-hidden">
-        <table class="min-w-full divide-y divide-kalisi-border text-left text-sm">
-          <thead class="bg-kalisi-surfaceLight/60 text-gray-400 text-xs uppercase font-bold">
-            <tr>
-              <th class="px-6 py-4">Member Name</th>
-              <th class="px-6 py-4">City & Slot</th>
-              <th class="px-6 py-4">Table Assigned</th>
-              <th class="px-6 py-4">Price Paid</th>
-              <th class="px-6 py-4">Payment Method</th>
-              <th class="px-6 py-4">Attendance</th>
-              <th class="px-6 py-4">Booking ID</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-kalisi-border" id="bookings-tbody">
-            <!-- Rendered by JS -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- TAB 5: VERIFIED VENUES (DEEP DETAILS) -->
-    <div id="tab-venues" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="text-2xl font-black text-white">Partnered Public Restaurant Venues</h2>
-          <p class="text-xs text-gray-400 mt-1">Detailed venue dossiers: activities conducted, occupied duration, and special ambiance highlights.</p>
-        </div>
-        <button onclick="document.getElementById('modal-new-venue').classList.remove('hidden')" class="px-4 py-2 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 transition">
-          + Add Partner Venue
-        </button>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="venues-full-container">
-        <!-- Rendered by JS -->
-      </div>
-    </div>
-
-    <!-- TAB 6: PAYMENTS & REVENUE HUB -->
-    <div id="tab-payments" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="text-2xl font-black text-white">Payments & Revenue Hub</h2>
-          <p class="text-xs text-gray-400 mt-1">Track financial conversions, ticket sales, and Razorpay/Stripe transactions.</p>
-        </div>
-      </div>
-
-      <!-- Financial Metrics -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="glass-card p-6 rounded-2xl space-y-2">
-          <span class="text-xs text-gray-400 uppercase font-bold">Gross Revenue</span>
-          <div class="text-3xl font-black text-kalisi-gold" id="pay-total-revenue">₹0</div>
-          <p class="text-[11px] text-gray-500">Collected from ticketed dinner slots & passes.</p>
-        </div>
-        <div class="glass-card p-6 rounded-2xl space-y-2">
-          <span class="text-xs text-gray-400 uppercase font-bold">Paid Seat Conversions</span>
-          <div class="text-3xl font-black text-green-400" id="pay-paid-count">0</div>
-          <p class="text-[11px] text-gray-500">Members who booked with standard fee.</p>
-        </div>
-        <div class="glass-card p-6 rounded-2xl space-y-2">
-          <span class="text-xs text-gray-400 uppercase font-bold">Free Trial First Dinners</span>
-          <div class="text-3xl font-black text-kalisi-purple" id="pay-trial-count">0</div>
-          <p class="text-[11px] text-gray-500">First-time members using trial promotion.</p>
-        </div>
-      </div>
-
-      <!-- Pricing Plans Available in Platform -->
-      <div class="glass-card rounded-2xl p-6 space-y-4">
-        <h3 class="text-base font-black text-white">Configured Platform Pricing Tiers</h3>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-          <div class="p-4 rounded-xl bg-kalisi-surfaceLight border border-kalisi-border">
-            <span class="font-extrabold text-kalisi-gold uppercase block text-[11px]">Free Trial</span>
-            <div class="text-xl font-black text-white mt-1">₹0</div>
-            <p class="text-gray-400 mt-1">First dinner free per user to eliminate onboarding friction.</p>
-          </div>
-          <div class="p-4 rounded-xl bg-kalisi-surfaceLight border border-kalisi-border">
-            <span class="font-extrabold text-green-400 uppercase block text-[11px]">Single Dinner Pass</span>
-            <div class="text-xl font-black text-white mt-1">₹499 / dinner</div>
-            <p class="text-gray-400 mt-1">Curated seat reservation, 5-stranger matching, icebreakers.</p>
-          </div>
-          <div class="p-4 rounded-xl bg-kalisi-surfaceLight border border-kalisi-border">
-            <span class="font-extrabold text-kalisi-purple uppercase block text-[11px]">Monthly Vibe Pass</span>
-            <div class="text-xl font-black text-white mt-1">₹1,499 / month</div>
-            <p class="text-gray-400 mt-1">Unlimited weekend dinners + priority table placement.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- TAB 7: USER VIBE DNA DIRECTORY -->
-    <div id="tab-users" class="hidden space-y-6">
-      <div class="flex justify-between items-center">
-        <div>
-          <h2 class="text-2xl font-black text-white">User Vibe DNA & Personality Profiles</h2>
-          <p class="text-xs text-gray-400 mt-1">Classified into 4 conversational archetypes: Clark Kent (Anchor), Stark (Spark), Phoebe (Storyteller), Sherlock (Inquirer).</p>
+          <h2 class="text-2xl font-black text-white">Users Directory</h2>
+          <p class="text-xs text-gray-400">All registered attendees with Vibe DNA archetypes, age, gender, and contact info.</p>
         </div>
       </div>
 
       <div class="glass-card rounded-2xl overflow-hidden">
-        <table class="min-w-full divide-y divide-kalisi-border text-left text-sm">
-          <thead class="bg-kalisi-surfaceLight/60 text-gray-400 text-xs uppercase font-bold">
-            <tr>
-              <th class="px-6 py-4">User</th>
-              <th class="px-6 py-4">City</th>
-              <th class="px-6 py-4">Conversational Archetype</th>
-              <th class="px-6 py-4">Budget Tier</th>
-              <th class="px-6 py-4">Dietary Preference</th>
-              <th class="px-6 py-4">Verification</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-kalisi-border" id="users-tbody">
-            <!-- Rendered by JS -->
-          </tbody>
-        </table>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-kalisi-surfaceLight text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-kalisi-border">
+              <tr>
+                <th class="px-6 py-4">User</th>
+                <th class="px-6 py-4">Phone</th>
+                <th class="px-6 py-4">Age / Gender</th>
+                <th class="px-6 py-4">City</th>
+                <th class="px-6 py-4">Vibe DNA Archetype</th>
+                <th class="px-6 py-4">Bookings</th>
+                <th class="px-6 py-4">Status</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody" class="divide-y divide-kalisi-border text-gray-300"></tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </section>
+
+    <!-- TAB 3: EVENTS LIST -->
+    <section id="tab-events" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white">Events Management</h2>
+          <p class="text-xs text-gray-400">Manage all dinner events, edit titles, venues, rules, price, and toggle availability.</p>
+        </div>
+        <button onclick="document.getElementById('modal-new-slot').classList.remove('hidden')" class="px-4 py-2.5 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 active:scale-95 transition flex items-center space-x-2">
+          <i class="fas fa-plus"></i>
+          <span>Schedule New Event</span>
+        </button>
+      </div>
+
+      <div class="glass-card rounded-2xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-kalisi-surfaceLight text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-kalisi-border">
+              <tr>
+                <th class="px-6 py-4">Event Name & City</th>
+                <th class="px-6 py-4">Date & Time</th>
+                <th class="px-6 py-4">Venue & Address</th>
+                <th class="px-6 py-4">Price</th>
+                <th class="px-6 py-4">Bookings</th>
+                <th class="px-6 py-4">Status</th>
+                <th class="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="events-tbody" class="divide-y divide-kalisi-border text-gray-300"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: PARTICULAR EVENT BOOKINGS -->
+    <section id="tab-event-bookings" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white">Particular Event Bookings</h2>
+          <p class="text-xs text-gray-400">Detailed attendee breakdown, dietary requirements & attendance for a specific event.</p>
+        </div>
+        <!-- Event Switcher Dropdown -->
+        <div class="flex items-center space-x-3">
+          <label class="text-xs font-bold text-gray-400">Select Event:</label>
+          <select id="event-select-dropdown" onchange="onSelectEventFromDropdown()" class="bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-xs font-bold text-white focus:outline-none focus:border-kalisi-gold">
+          </select>
+        </div>
+      </div>
+
+      <!-- Event Header Banner -->
+      <div id="event-detail-banner" class="glass-card p-6 rounded-2xl border-l-4 border-l-kalisi-gold space-y-2">
+      </div>
+
+      <!-- Attendees Table -->
+      <div class="glass-card rounded-2xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-kalisi-surfaceLight text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-kalisi-border">
+              <tr>
+                <th class="px-6 py-4">Attendee</th>
+                <th class="px-6 py-4">Phone</th>
+                <th class="px-6 py-4">Age / Gender</th>
+                <th class="px-6 py-4">Archetype</th>
+                <th class="px-6 py-4">Dietary</th>
+                <th class="px-6 py-4">Payment</th>
+                <th class="px-6 py-4">Attendance</th>
+                <th class="px-6 py-4 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="event-attendees-tbody" class="divide-y divide-kalisi-border text-gray-300"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: PAYMENTS & FINANCIAL LEDGER -->
+    <section id="tab-payments" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white">Payments & Revenue</h2>
+          <p class="text-xs text-gray-400">Audit trail of all transaction records, payment methods, and revenue.</p>
+        </div>
+      </div>
+
+      <div class="glass-card rounded-2xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-kalisi-surfaceLight text-xs font-bold text-gray-400 uppercase tracking-wider border-b border-kalisi-border">
+              <tr>
+                <th class="px-6 py-4">Booking ID</th>
+                <th class="px-6 py-4">User</th>
+                <th class="px-6 py-4">Event Date & City</th>
+                <th class="px-6 py-4">Amount</th>
+                <th class="px-6 py-4">Method</th>
+                <th class="px-6 py-4">Status</th>
+                <th class="px-6 py-4">Date</th>
+              </tr>
+            </thead>
+            <tbody id="payments-tbody" class="divide-y divide-kalisi-border text-gray-300"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: VIDEOS & REELS -->
+    <section id="tab-videos" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white">Dinner Videos & Reels</h2>
+          <p class="text-xs text-gray-400">Manage short community dinner reels displayed on mobile app.</p>
+        </div>
+        <button onclick="document.getElementById('modal-new-video').classList.remove('hidden')" class="px-4 py-2.5 rounded-xl bg-kalisi-purple text-white text-xs font-black hover:brightness-110 active:scale-95 transition flex items-center space-x-2">
+          <i class="fas fa-plus"></i>
+          <span>Add New Video</span>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="videos-grid">
+      </div>
+    </section>
+
+    <!-- TAB 7: VERIFIED VENUES -->
+    <section id="tab-venues" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white">Verified Partner Venues</h2>
+          <p class="text-xs text-gray-400">Handpicked restaurants with curated private tables, acoustics, and partner perks.</p>
+        </div>
+        <button onclick="document.getElementById('modal-new-venue').classList.remove('hidden')" class="px-4 py-2.5 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110 active:scale-95 transition flex items-center space-x-2">
+          <i class="fas fa-plus"></i>
+          <span>Add Verified Venue</span>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" id="venues-grid">
+      </div>
+    </section>
 
   </main>
 
   <!-- ======================================================================= -->
-  <!-- 4. MODALS (CREATE SLOT & CREATE VENUE)                                   -->
+  <!-- MODAL: ADD NEW EVENT SLOT & VENUE                                       -->
   <!-- ======================================================================= -->
-
-  <!-- Modal: Create Slot -->
-  <div id="modal-new-slot" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 hidden">
-    <div class="glass-card bg-kalisi-surface p-7 rounded-3xl max-w-md w-full space-y-5 border border-kalisi-border">
-      <div class="flex justify-between items-center">
-        <h3 class="text-lg font-black text-white">Schedule Weekend Slot</h3>
+  <div id="modal-new-slot" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="glass-card bg-kalisi-surface max-w-2xl w-full p-6 rounded-3xl border border-kalisi-border space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between pb-3 border-b border-kalisi-border">
+        <h3 class="text-lg font-black text-white">Create New Event & Venue</h3>
         <button onclick="document.getElementById('modal-new-slot').classList.add('hidden')" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
       </div>
       <form onsubmit="handleCreateSlot(event)" class="space-y-4">
         <div>
-          <label class="block text-xs font-bold text-gray-400 mb-1">City</label>
-          <input type="text" name="city" value="Chennai" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
-        </div>
-        <div>
-          <label class="block text-xs font-bold text-gray-400 mb-1">Date String (e.g. Sat, 12/12/2026)</label>
-          <input type="text" name="date_str" placeholder="Sat, 12/12/2026" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
-        </div>
-        <div>
-          <label class="block text-xs font-bold text-gray-400 mb-1">Time Window</label>
-          <input type="text" name="time_window" value="19:00 - 22:00" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Event Name / Title</label>
+          <input type="text" name="title" required placeholder="e.g. Saturday Rooftop Stranger Dinner" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-bold text-gray-400 mb-1">Slot Price (₹)</label>
-            <input type="number" name="price_inr" value="499" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">City / Neighborhood</label>
+            <input type="text" name="city" required placeholder="e.g. Central Bangalore" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 mb-1">Total Capacity</label>
-            <input type="number" name="max_capacity" value="10" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Date</label>
+            <input type="text" name="date_str" required placeholder="Sat, 11/28/2026" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
         </div>
-        <div class="flex justify-end space-x-3 pt-3">
-          <button type="button" onclick="document.getElementById('modal-new-slot').classList.add('hidden')" class="px-4 py-2 text-xs font-bold text-gray-400 hover:text-white">Cancel</button>
-          <button type="submit" class="px-5 py-2.5 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110">Schedule Slot</button>
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Time Window</label>
+            <input type="text" name="time_window" required placeholder="19:30 - 22:30" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Price (INR)</label>
+            <input type="number" name="price_inr" value="599" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Max Seats Capacity</label>
+            <input type="number" name="max_capacity" value="10" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+          </div>
+        </div>
+        <div class="pt-2 border-t border-kalisi-border">
+          <h4 class="text-xs font-black text-kalisi-gold uppercase mb-2">Venue & Restaurant Information</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue / Restaurant Name</label>
+              <input type="text" name="venue_name" required placeholder="e.g. Smoke House Deli Lavelle Road" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue Full Address</label>
+              <textarea name="venue_address" rows="2" required placeholder="Full street address & landmark" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">52, Ground Floor, Lavelle Road, Shanthala Nagar, Ashok Nagar, Bengaluru</textarea>
+            </div>
+          </div>
+        </div>
+        <div class="pt-2 border-t border-kalisi-border">
+          <h4 class="text-xs font-black text-kalisi-gold uppercase mb-2">Event Details & Guidelines</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">About the Event</label>
+              <textarea name="about_event" rows="2" required class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">Join 5 curated strangers for an evening of genuine conversations, delicious dining, and icebreaker games.</textarea>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Rules & Regulations</label>
+              <textarea name="rules_and_regulations" rows="2" required class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">1. Arrive within 15 minutes of start time.
+2. Equal bill splitting for food & drinks.
+3. Keep phone away and enjoy real conversations.
+4. Age 18+ verified diners only.</textarea>
+            </div>
+          </div>
+        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-kalisi-gold text-black font-extrabold text-sm hover:brightness-110 transition mt-2">Publish Event with Venue Details</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ======================================================================= -->
+  <!-- MODAL: EDIT EVENT & VENUE DETAILS                                       -->
+  <!-- ======================================================================= -->
+  <div id="modal-edit-event" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="glass-card bg-kalisi-surface max-w-2xl w-full p-6 rounded-3xl border border-kalisi-border space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between pb-3 border-b border-kalisi-border">
+        <div class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center text-sm font-bold">
+            <i class="fas fa-pen-to-square"></i>
+          </div>
+          <div>
+            <h3 class="text-lg font-black text-white">Edit Event Details</h3>
+            <p class="text-xs text-gray-400">Update event schedule, venue, pricing, rules, and publish again.</p>
+          </div>
+        </div>
+        <button onclick="document.getElementById('modal-edit-event').classList.add('hidden')" class="text-gray-400 hover:text-white p-2"><i class="fas fa-times text-lg"></i></button>
+      </div>
+      <form onsubmit="handleUpdateEvent(event)" class="space-y-4">
+        <input type="hidden" name="event_id" id="edit-event-id">
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Event Name / Title</label>
+          <input type="text" name="title" id="edit-title" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">City / Neighborhood</label>
+            <input type="text" name="city" id="edit-city" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Date</label>
+            <input type="text" name="date_str" id="edit-date-str" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Time Window</label>
+            <input type="text" name="time_window" id="edit-time-window" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Price (INR)</label>
+            <input type="number" name="price_inr" id="edit-price-inr" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Max Capacity</label>
+            <input type="number" name="max_capacity" id="edit-max-capacity" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Status</label>
+          <select name="status" id="edit-status" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+            <option value="open">Open (Active & Visible on App)</option>
+            <option value="disabled">Disabled (Hidden from App)</option>
+            <option value="completed">Completed (Archived)</option>
+          </select>
+        </div>
+        <div class="pt-2 border-t border-kalisi-border">
+          <h4 class="text-xs font-black text-kalisi-gold uppercase mb-2">Venue & Restaurant Information</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue / Restaurant Name</label>
+              <input type="text" name="venue_name" id="edit-venue-name" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue Full Address</label>
+              <textarea name="venue_address" id="edit-venue-address" rows="2" required class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="pt-2 border-t border-kalisi-border">
+          <h4 class="text-xs font-black text-kalisi-gold uppercase mb-2">Event Details & Guidelines</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">About the Event</label>
+              <textarea name="about_event" id="edit-about-event" rows="3" required class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400"></textarea>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Rules & Regulations</label>
+              <textarea name="rules_and_regulations" id="edit-rules" rows="3" required class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-blue-400"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center space-x-3 pt-2">
+          <button type="button" onclick="document.getElementById('modal-edit-event').classList.add('hidden')" class="w-1/3 py-3 rounded-xl bg-gray-700 hover:bg-gray-600 text-white font-bold text-sm transition">Cancel</button>
+          <button type="submit" class="w-2/3 py-3 rounded-xl bg-blue-500 hover:bg-blue-400 text-white font-black text-sm transition shadow-lg shadow-blue-500/20"><i class="fas fa-check-double mr-2"></i>Save & Post Event Updates</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- Modal: Create Partner Venue (With Rich Activities & Special Features) -->
-  <div id="modal-new-venue" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 hidden">
-    <div class="glass-card bg-kalisi-surface p-7 rounded-3xl max-w-lg w-full space-y-5 border border-kalisi-border max-h-[90vh] overflow-y-auto">
-      <div class="flex justify-between items-center">
+  <!-- ======================================================================= -->
+  <!-- MODAL: ADD NEW VIDEO / REEL                                             -->
+  <!-- ======================================================================= -->
+  <div id="modal-new-video" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="glass-card bg-kalisi-surface max-w-lg w-full p-6 rounded-3xl border border-kalisi-border space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-kalisi-border">
+        <h3 class="text-lg font-black text-white">Add New Video Reel</h3>
+        <button onclick="document.getElementById('modal-new-video').classList.add('hidden')" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
+      </div>
+      <form onsubmit="handleCreateVideo(event)" class="space-y-4">
         <div>
-          <h3 class="text-lg font-black text-white">Add Verified Partner Venue</h3>
-          <p class="text-xs text-gray-400">Include activities, occupied time, and special features.</p>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Video Title</label>
+          <input type="text" name="title" required placeholder="e.g. When 5 Introverts Dine Together" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
         </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue / Event</label>
+          <input type="text" name="venue_name" required placeholder="e.g. Central Bangalore Meetup" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Video MP4 URL</label>
+          <input type="url" name="video_url" required value="https://www.w3schools.com/html/mov_bbb.mp4" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Thumbnail Image URL</label>
+          <input type="url" name="thumbnail_url" value="https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-kalisi-purple text-white font-extrabold text-sm hover:brightness-110 transition mt-2">Publish Video Reel</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ======================================================================= -->
+  <!-- MODAL: ADD VERIFIED VENUE                                               -->
+  <!-- ======================================================================= -->
+  <div id="modal-new-venue" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="glass-card bg-kalisi-surface max-w-xl w-full p-6 rounded-3xl border border-kalisi-border space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between pb-3 border-b border-kalisi-border">
+        <h3 class="text-lg font-black text-white">Add Verified Partner Venue</h3>
         <button onclick="document.getElementById('modal-new-venue').classList.add('hidden')" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
       </div>
-
-      <form onsubmit="handleCreateVenue(event)" class="space-y-4 text-xs">
-        <div>
-          <label class="block font-bold text-gray-400 mb-1">Restaurant Name</label>
-          <input type="text" name="name" placeholder="e.g. Chamber of Potions" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+      <form onsubmit="handleCreateVenue(event)" class="space-y-3.5">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue Name</label>
+            <input type="text" name="name" required placeholder="e.g. The Fatty Bao" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">City</label>
+            <input type="text" name="city" required placeholder="e.g. Bangalore" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
+          </div>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block font-bold text-gray-400 mb-1">Neighborhood</label>
-            <input type="text" name="neighborhood" placeholder="e.g. Anna Nagar" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Neighborhood</label>
+            <input type="text" name="neighborhood" required placeholder="e.g. Indiranagar" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
           <div>
-            <label class="block font-bold text-gray-400 mb-1">City</label>
-            <input type="text" name="city" value="Chennai" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Cuisine</label>
+            <input type="text" name="cuisine" required placeholder="e.g. Asian / Dim Sum" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
         </div>
         <div>
-          <label class="block font-bold text-gray-400 mb-1">Full Street Address</label>
-          <textarea name="full_address" rows="2" placeholder="Building, Main road, Block, City, Pin..." required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold"></textarea>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Full Address</label>
+          <input type="text" name="full_address" required placeholder="Complete physical address" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Activities Conducted</label>
+          <input type="text" name="activities" value="Table icebreaker card games, curated conversation starters" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block font-bold text-gray-400 mb-1">Cuisine Style</label>
-            <input type="text" name="cuisine" placeholder="e.g. Italian / Continental" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Duration Occupied</label>
+            <input type="text" name="duration_hours" value="2.5 Hours" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
           <div>
-            <label class="block font-bold text-gray-400 mb-1">Price Tier</label>
-            <select name="price_tier" class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
-              <option value="budget">Budget-Friendly (&lt;₹800)</option>
-              <option value="mid_range" selected>Mid-Range (₹800-₹1500)</option>
-              <option value="premium">Premium (&gt;₹1500)</option>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Price Tier</label>
+            <select name="price_tier" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
+              <option value="budget">Budget (Under ₹800)</option>
+              <option value="mid_range" selected>Mid-Range (₹800 - ₹1500)</option>
+              <option value="premium">Premium (₹1500+)</option>
             </select>
           </div>
         </div>
-
-        <!-- NEW RICH FIELDS REQUESTED BY USER -->
         <div>
-          <label class="block font-bold text-kalisi-gold mb-1">Activities Conducted There</label>
-          <input type="text" name="activities" value="Table-side icebreaker card deck, rapid vibe trivia, host welcome" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
-          <span class="text-[10px] text-gray-500">What social games, icebreakers, or experiences happen at the table?</span>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Special Highlights & Features</label>
+          <input type="text" name="special_features" value="Dedicated private table, welcome drinks" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
         </div>
-
-        <div>
-          <label class="block font-bold text-kalisi-gold mb-1">Time Occupied / Duration</label>
-          <input type="text" name="duration_hours" value="2.5 Hours (19:00 - 21:30)" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
-          <span class="text-[10px] text-gray-500">How long will the dinner table be reserved for the strangers?</span>
-        </div>
-
-        <div>
-          <label class="block font-bold text-kalisi-gold mb-1">What is Special About That Venue? (Highlights)</label>
-          <textarea name="special_features" rows="2" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">Dedicated 6-person secluded booth, ambient acoustic lighting, complimentary signature mocktail.</textarea>
-          <span class="text-[10px] text-gray-500">Unique vibes, secret corners, view, drinks, or ambiance highlights.</span>
-        </div>
-
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block font-bold text-gray-400 mb-1">Contact Person</label>
-            <input type="text" name="contact_person" value="Restaurant Manager" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Manager Contact Person</label>
+            <input type="text" name="contact_person" value="Manager on Duty" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
           <div>
-            <label class="block font-bold text-gray-400 mb-1">Contact Phone</label>
-            <input type="text" name="contact_phone" value="+91 98400 12345" required class="w-full bg-kalisi-surfaceLight border border-kalisi-border rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Manager Phone</label>
+            <input type="text" name="contact_phone" value="+91 98765 43210" class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-sm text-white">
           </div>
         </div>
-
-        <div class="flex justify-end space-x-3 pt-3">
-          <button type="button" onclick="document.getElementById('modal-new-venue').classList.add('hidden')" class="px-4 py-2 text-xs font-bold text-gray-400 hover:text-white">Cancel</button>
-          <button type="submit" class="px-5 py-2.5 rounded-xl bg-kalisi-gold text-black text-xs font-black hover:brightness-110">Save Verified Venue</button>
-        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-kalisi-gold text-black font-extrabold text-sm hover:brightness-110 transition mt-2">Save Venue</button>
       </form>
     </div>
   </div>
 
-  <!-- ======================================================================= -->
-  <!-- 5. FRONTEND SCRIPTS                                                     -->
-  <!-- ======================================================================= -->
+  <!-- JAVASCRIPT CONTROLLER -->
   <script>
-    let appData = {};
-
-    function checkAuth() {
-      const token = localStorage.getItem('kalisi_admin_token');
-      if (token) {
-        document.getElementById('auth-overlay').classList.add('hidden');
-        loadData();
-      } else {
-        document.getElementById('auth-overlay').classList.remove('hidden');
-      }
-    }
-
-    async function handleLogin(e) {
-      e.preventDefault();
-      const username = document.getElementById('login-username').value;
-      const password = document.getElementById('login-password').value;
-      const errBox = document.getElementById('login-error');
-
-      const formData = new FormData();
-      formData.append('username', username);
-      formData.append('password', password);
-
-      try {
-        const res = await fetch('/admin/api/login', { method: 'POST', body: formData });
-        if (res.ok) {
-          const data = await res.json();
-          localStorage.setItem('kalisi_admin_token', data.token);
-          document.getElementById('auth-overlay').classList.add('hidden');
-          loadData();
-        } else {
-          errBox.innerText = 'Invalid username or password. Check .env configuration.';
-          errBox.classList.remove('hidden');
-        }
-      } catch (err) {
-        errBox.innerText = 'Server error during login.';
-        errBox.classList.remove('hidden');
-      }
-    }
-
-    function handleLogout() {
-      localStorage.removeItem('kalisi_admin_token');
-      document.getElementById('auth-overlay').classList.remove('hidden');
-    }
-
-    async function loadData() {
-      try {
-        const res = await fetch('/admin/api/overview');
-        appData = await res.json();
-        renderKPIs();
-        renderTables();
-        renderSlots();
-        renderBookings();
-        renderVenues();
-        renderUsers();
-      } catch (err) {
-        console.error('Failed to load admin data:', err);
-      }
-    }
-
-    function renderKPIs() {
-      const m = appData.metrics;
-      document.getElementById('kpi-users').innerText = m.total_users;
-      document.getElementById('kpi-slots').innerText = m.active_slots;
-      document.getElementById('kpi-tables').innerText = m.total_tables;
-      document.getElementById('kpi-bookings').innerText = m.total_bookings;
-      document.getElementById('kpi-venues').innerText = m.total_restaurants;
-      document.getElementById('kpi-revenue').innerText = '₹' + m.total_revenue_inr.toLocaleString('en-IN');
-
-      // Payments tab KPIs
-      document.getElementById('pay-total-revenue').innerText = '₹' + m.total_revenue_inr.toLocaleString('en-IN');
-      document.getElementById('pay-paid-count').innerText = m.paid_bookings;
-      document.getElementById('pay-trial-count').innerText = m.free_trials;
-
-      // Overview summaries
-      const tSummary = document.getElementById('overview-tables-summary');
-      tSummary.innerHTML = appData.tables.slice(0, 3).map(t => `
-        <div class="flex items-center justify-between p-3 rounded-xl bg-kalisi-surfaceLight/50 border border-kalisi-border text-xs">
-          <div>
-            <span class="font-bold text-white block">Table #${t.table_number} • ${t.restaurant_name}</span>
-            <span class="text-gray-400 text-[11px]">${t.city} • ${t.date_str}</span>
-          </div>
-          <span class="px-2.5 py-1 rounded-full text-[10px] font-extrabold ${t.reveal_stage === 'fully_revealed' ? 'bg-green-500/20 text-green-400' : 'bg-kalisi-gold/20 text-kalisi-gold'} uppercase">${t.reveal_stage}</span>
-        </div>
-      `).join('') || '<div class="text-xs text-gray-500">No tables formed yet.</div>';
-
-      const bSummary = document.getElementById('overview-bookings-summary');
-      bSummary.innerHTML = appData.bookings.slice(0, 3).map(b => `
-        <div class="flex items-center justify-between p-3 rounded-xl bg-kalisi-surfaceLight/50 border border-kalisi-border text-xs">
-          <div>
-            <span class="font-bold text-white block">${b.user_name}</span>
-            <span class="text-gray-400 text-[11px]">${b.slot_city} • ${b.slot_date}</span>
-          </div>
-          <span class="font-black ${b.amount_paid > 0 ? 'text-green-400' : 'text-kalisi-gold'}">${b.amount_paid > 0 ? '₹' + b.amount_paid : 'Free Trial'}</span>
-        </div>
-      `).join('') || '<div class="text-xs text-gray-500">No bookings yet.</div>';
-    }
-
-    function renderTables() {
-      const container = document.getElementById('tables-full-container');
-      if (!appData.tables || appData.tables.length === 0) {
-        container.innerHTML = `<div class="col-span-full py-12 text-center text-gray-500">No tables formed yet. Click "Run Matchmaker" to cluster bookings.</div>`;
-        return;
-      }
-      container.innerHTML = appData.tables.map(t => {
-        let badgeColor = 'bg-gray-800 text-gray-300 border-gray-700';
-        let stageLabel = 'Locked (T > 24h)';
-        if (t.reveal_stage === 'area_revealed') {
-          badgeColor = 'bg-kalisi-gold/20 text-kalisi-gold border-kalisi-gold/40';
-          stageLabel = 'Area Revealed (T-24h)';
-        } else if (t.reveal_stage === 'fully_revealed') {
-          badgeColor = 'bg-green-500/20 text-green-400 border-green-500/40';
-          stageLabel = 'Fully Revealed (Day-Of)';
-        }
-
-        return `
-          <div class="glass-card rounded-2xl p-6 flex flex-col justify-between space-y-4">
-            <div>
-              <div class="flex items-center justify-between">
-                <span class="text-xs font-black text-kalisi-gold uppercase tracking-wider">Table #${t.table_number}</span>
-                <span class="text-[11px] px-2.5 py-0.5 rounded-full border font-bold ${badgeColor}">${stageLabel}</span>
-              </div>
-              <h3 class="text-lg font-black mt-2 text-white">${t.restaurant_name}</h3>
-              <p class="text-xs text-gray-400">${t.neighborhood ? t.neighborhood + ', ' : ''}${t.city} • ${t.date_str} (${t.time_window})</p>
-              
-              <div class="mt-4 p-3 bg-kalisi-surfaceLight/80 rounded-xl border border-kalisi-border">
-                <span class="text-[10px] uppercase font-black text-kalisi-purple block mb-1">Group Chemistry</span>
-                <p class="text-xs font-semibold text-gray-200">${t.archetype_summary}</p>
-              </div>
-
-              <div class="mt-4 space-y-2">
-                <div class="flex justify-between items-center text-xs">
-                  <span class="font-bold text-gray-400 uppercase text-[10px]">Members (${t.attendee_count}/${t.target_size})</span>
-                  <span class="text-[11px] ${t.seats_available === 0 ? 'text-kalisi-gold font-bold' : 'text-gray-400'}">${t.seats_available === 0 ? 'Table Full' : t.seats_available + ' seat(s) open'}</span>
-                </div>
-                ${t.attendees.map(a => `
-                  <div class="flex items-center justify-between text-xs py-1.5 px-3 rounded-lg bg-kalisi-surfaceLight/40 border border-kalisi-border/60">
-                    <span class="font-bold text-white">${a.name}</span>
-                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-kalisi-border font-bold text-kalisi-gold">${a.archetype}</span>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-
-            <div class="pt-3 border-t border-kalisi-border flex items-center justify-between">
-              <span class="text-[11px] font-bold text-gray-400">Advance Stage:</span>
-              <div class="flex space-x-1.5">
-                <button onclick="setStage('${t.id}', 'locked')" class="px-2.5 py-1 text-[11px] rounded-lg font-bold ${t.reveal_stage === 'locked' ? 'bg-white text-black' : 'bg-kalisi-surfaceLight text-gray-300'}">Lock</button>
-                <button onclick="setStage('${t.id}', 'area_revealed')" class="px-2.5 py-1 text-[11px] rounded-lg font-bold ${t.reveal_stage === 'area_revealed' ? 'bg-kalisi-gold text-black' : 'bg-kalisi-surfaceLight text-gray-300'}">Area (24h)</button>
-                <button onclick="setStage('${t.id}', 'fully_revealed')" class="px-2.5 py-1 text-[11px] rounded-lg font-bold ${t.reveal_stage === 'fully_revealed' ? 'bg-green-400 text-black' : 'bg-kalisi-surfaceLight text-gray-300'}">Full</button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-
-    function renderSlots() {
-      const tbody = document.getElementById('slots-tbody');
-      tbody.innerHTML = appData.slots.map(s => `
-        <tr class="hover:bg-kalisi-surfaceLight/30 transition">
-          <td class="px-6 py-4 font-black text-white">${s.city}</td>
-          <td class="px-6 py-4 text-kalisi-gold font-bold">${s.date_str}</td>
-          <td class="px-6 py-4 text-gray-300">${s.time_window}</td>
-          <td class="px-6 py-4 font-black text-green-400">₹${s.price_inr}</td>
-          <td class="px-6 py-4">
-            <div class="flex items-center space-x-2">
-              <span class="font-bold text-white">${s.bookings_count} / ${s.max_capacity}</span>
-              <div class="w-16 bg-kalisi-surfaceLight rounded-full h-1.5">
-                <div class="bg-kalisi-gold h-1.5 rounded-full" style="width: ${(s.bookings_count / s.max_capacity) * 100}%"></div>
-              </div>
-            </div>
-          </td>
-          <td class="px-6 py-4 font-black ${s.seats_left === 0 ? 'text-red-400' : 'text-kalisi-blue'}">${s.seats_left === 0 ? 'Sold Out' : s.seats_left + ' seats'}</td>
-          <td class="px-6 py-4"><span class="px-2.5 py-0.5 text-[10px] rounded-full bg-green-500/20 text-green-400 font-extrabold uppercase">${s.status}</span></td>
-        </tr>
-      `).join('');
-    }
-
-    function renderBookings() {
-      const tbody = document.getElementById('bookings-tbody');
-      tbody.innerHTML = appData.bookings.map(b => `
-        <tr class="hover:bg-kalisi-surfaceLight/30 transition">
-          <td class="px-6 py-4">
-            <span class="font-black text-white block">${b.user_name}</span>
-            <span class="text-xs text-gray-400">${b.user_email}</span>
-          </td>
-          <td class="px-6 py-4 text-xs">
-            <span class="font-bold text-kalisi-gold block">${b.slot_city}</span>
-            <span class="text-gray-300">${b.slot_date} (${b.slot_time})</span>
-          </td>
-          <td class="px-6 py-4 font-bold ${b.table_number ? 'text-kalisi-purple' : 'text-gray-500'}">${b.table_number ? 'Table #' + b.table_number : 'In Clustering Queue'}</td>
-          <td class="px-6 py-4 font-black ${b.amount_paid > 0 ? 'text-green-400' : 'text-kalisi-gold'}">${b.amount_paid > 0 ? '₹' + b.amount_paid : '₹0 (Free Trial)'}</td>
-          <td class="px-6 py-4 text-xs font-semibold text-gray-300">${b.payment_method}</td>
-          <td class="px-6 py-4">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${b.attendance_confirmed ? 'bg-green-500/20 text-green-400' : 'bg-gray-800 text-gray-400'}">${b.attendance_confirmed ? 'Confirmed' : 'Pending (T-2h)'}</span>
-          </td>
-          <td class="px-6 py-4 text-[11px] font-mono text-gray-500">${b.id.substring(0, 8)}...</td>
-        </tr>
-      `).join('');
-    }
-
-    function renderVenues() {
-      const container = document.getElementById('venues-full-container');
-      container.innerHTML = appData.restaurants.map(r => `
-        <div class="glass-card rounded-2xl p-6 flex flex-col justify-between space-y-4">
-          <div>
-            <div class="flex justify-between items-start">
-              <div>
-                <h3 class="font-black text-white text-lg">${r.name}</h3>
-                <span class="text-xs text-kalisi-gold font-bold">${r.neighborhood}, ${r.city}</span>
-              </div>
-              <span class="text-[10px] uppercase font-black px-2.5 py-0.5 rounded-full bg-kalisi-gold/20 text-kalisi-gold border border-kalisi-gold/30">${r.price_tier}</span>
-            </div>
-
-            <p class="text-xs text-gray-400 mt-2">${r.address}</p>
-
-            <div class="mt-4 space-y-2.5 border-t border-kalisi-border pt-3">
-              <div>
-                <span class="text-[10px] font-black uppercase text-kalisi-gold block">Activities Conducted There:</span>
-                <p class="text-xs text-gray-200 mt-0.5 font-medium">${r.activities}</p>
-              </div>
-
-              <div>
-                <span class="text-[10px] font-black uppercase text-kalisi-blue block">Time Occupied / Duration:</span>
-                <p class="text-xs text-gray-200 mt-0.5 font-medium">${r.duration_hours}</p>
-              </div>
-
-              <div>
-                <span class="text-[10px] font-black uppercase text-kalisi-purple block">Special About This Venue:</span>
-                <p class="text-xs text-gray-200 mt-0.5 font-medium">${r.special_features}</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="pt-3 border-t border-kalisi-border flex justify-between items-center text-[11px] text-gray-400">
-            <span>Contact: <b>${r.contact_person}</b></span>
-            <span>Tel: <b>${r.contact_phone}</b></span>
-          </div>
-        </div>
-      `).join('');
-    }
-
-    function renderUsers() {
-      const tbody = document.getElementById('users-tbody');
-      tbody.innerHTML = appData.users.map(u => `
-        <tr class="hover:bg-kalisi-surfaceLight/30 transition">
-          <td class="px-6 py-4">
-            <span class="font-black text-white block">${u.name}</span>
-            <span class="text-xs text-gray-400">${u.email}</span>
-          </td>
-          <td class="px-6 py-4 text-gray-300 font-medium">${u.city}</td>
-          <td class="px-6 py-4">
-            <span class="px-3 py-1 rounded-full text-xs font-black bg-kalisi-purple/20 text-kalisi-purple border border-kalisi-purple/40">${u.archetype}</span>
-          </td>
-          <td class="px-6 py-4 text-kalisi-gold text-xs font-bold capitalize">${u.budget_tier}</td>
-          <td class="px-6 py-4 text-xs text-gray-300">${u.dietary}</td>
-          <td class="px-6 py-4"><span class="text-green-400 font-bold text-xs"><i class="fas fa-check-circle mr-1"></i>Verified</span></td>
-        </tr>
-      `).join('');
-    }
-
-    async function setStage(tableId, stage) {
-      const formData = new FormData();
-      formData.append('stage', stage);
-      await fetch(`/admin/api/tables/${tableId}/set-stage`, { method: 'POST', body: formData });
-      loadData();
-    }
-
-    async function triggerMatchmaking() {
-      const res = await fetch('/admin/api/matchmake', { method: 'POST' });
-      const data = await res.json();
-      alert(data.message || 'Matchmaking complete!');
-      loadData();
-    }
-
-    async function handleCreateSlot(e) {
-      e.preventDefault();
-      const form = e.target;
-      const data = new FormData(form);
-      await fetch('/admin/api/slots/create', { method: 'POST', body: data });
-      document.getElementById('modal-new-slot').classList.add('hidden');
-      form.reset();
-      loadData();
-    }
-
-    async function handleCreateVenue(e) {
-      e.preventDefault();
-      const form = e.target;
-      const data = new FormData(form);
-      await fetch('/admin/api/restaurants/create', { method: 'POST', body: data });
-      document.getElementById('modal-new-venue').classList.add('hidden');
-      form.reset();
-      loadData();
-    }
+    let globalData = null;
+    let selectedEventId = null;
 
     function navigateTab(tabId, url) {
       history.pushState({ tab: tabId }, '', url);
@@ -1104,12 +1064,12 @@ ADMIN_HTML = """<!DOCTYPE html>
 
     function detectTabFromPath() {
       const path = window.location.pathname;
-      if (path.includes('/tables')) switchTab('tables');
-      else if (path.includes('/slots')) switchTab('slots');
-      else if (path.includes('/bookings')) switchTab('bookings');
-      else if (path.includes('/venues')) switchTab('venues');
+      if (path.includes('/users')) switchTab('users');
+      else if (path.includes('/event-bookings')) switchTab('event-bookings');
+      else if (path.includes('/events') || path.includes('/slots')) switchTab('events');
       else if (path.includes('/payments')) switchTab('payments');
-      else if (path.includes('/vibe-dna') || path.includes('/users')) switchTab('users');
+      else if (path.includes('/videos')) switchTab('videos');
+      else if (path.includes('/venues')) switchTab('venues');
       else switchTab('overview');
     }
 
@@ -1118,7 +1078,7 @@ ADMIN_HTML = """<!DOCTYPE html>
     };
 
     function switchTab(tabId) {
-      const tabs = ['overview', 'tables', 'slots', 'bookings', 'venues', 'payments', 'users'];
+      const tabs = ['overview', 'users', 'events', 'event-bookings', 'payments', 'videos', 'venues'];
       tabs.forEach(t => {
         const el = document.getElementById('tab-' + t);
         const btn = document.getElementById('nav-btn-' + t);
@@ -1134,6 +1094,11 @@ ADMIN_HTML = """<!DOCTYPE html>
       if (activeBtn) {
         activeBtn.classList.add('bg-kalisi-gold/15', 'text-kalisi-gold', 'border', 'border-kalisi-gold/30', 'font-bold');
         activeBtn.classList.remove('text-gray-400', 'font-semibold');
+      }
+
+      // If switching to event-bookings, ensure event dropdown is populated
+      if (tabId === 'event-bookings' && globalData) {
+        renderEventBookingsPage();
       }
     }
 
@@ -1152,6 +1117,420 @@ ADMIN_HTML = """<!DOCTYPE html>
       window.location.href = '/admin/login';
     }
 
+    async function loadData() {
+      try {
+        const res = await fetch('/admin/api/overview');
+        const data = await res.json();
+        globalData = data;
+        renderAll(data);
+      } catch (e) {
+        console.error('Failed to load overview data', e);
+      }
+    }
+
+    function renderAll(data) {
+      // 1. Overview Stat Cards
+      document.getElementById('stat-total-users').innerText = data.metrics.total_users || 0;
+      document.getElementById('stat-booked-members').innerText = data.metrics.event_booked_members || 0;
+      document.getElementById('stat-active-events').innerText = data.metrics.active_events || 0;
+      document.getElementById('stat-completed-events').innerText = data.metrics.completed_events || 0;
+      document.getElementById('stat-total-revenue').innerText = '₹' + (data.metrics.total_revenue_inr || 0);
+      document.getElementById('stat-total-videos').innerText = data.metrics.total_videos || 0;
+      document.getElementById('stat-total-venues').innerText = data.metrics.total_venues || 0;
+
+      // Overview Live Tables
+      const ovEvents = document.getElementById('overview-events-tbody');
+      if (ovEvents) {
+        ovEvents.innerHTML = (data.events || []).slice(0, 5).map(e => `
+          <tr class="hover:bg-kalisi-surfaceLight/30">
+            <td class="py-2.5 px-3">
+              <span class="font-bold text-white block truncate max-w-[140px]">${e.title || 'Dinner Meetup'}</span>
+              <span class="text-[10px] text-kalisi-gold">${e.city}</span>
+            </td>
+            <td class="py-2.5 px-3 font-medium text-gray-300 text-[11px]">${e.date_str}</td>
+            <td class="py-2.5 px-3 font-bold text-kalisi-gold text-[11px]">₹${e.price_inr}</td>
+            <td class="py-2.5 px-3">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold ${e.bookings_count >= e.max_capacity ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}">
+                ${e.bookings_count}/${e.max_capacity}
+              </span>
+            </td>
+          </tr>
+        `).join('');
+      }
+
+      const ovBookings = document.getElementById('overview-bookings-tbody');
+      if (ovBookings) {
+        ovBookings.innerHTML = (data.bookings || []).slice(0, 5).map(b => `
+          <tr class="hover:bg-kalisi-surfaceLight/30">
+            <td class="py-2.5 px-3">
+              <span class="font-bold text-white block truncate max-w-[120px]">${b.user_name}</span>
+              <span class="text-[10px] text-gray-400">${b.user_archetype}</span>
+            </td>
+            <td class="py-2.5 px-3 font-medium text-gray-300 text-[11px]">${b.slot_city}</td>
+            <td class="py-2.5 px-3 font-bold text-kalisi-gold text-[11px]">₹${b.amount_paid}</td>
+            <td class="py-2.5 px-3">
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/20 text-green-400 uppercase">Paid</span>
+            </td>
+          </tr>
+        `).join('');
+      }
+
+      // 2. Users Directory Table
+      const usersTbody = document.getElementById('users-tbody');
+      usersTbody.innerHTML = (data.users || []).map(u => `
+        <tr class="hover:bg-kalisi-surfaceLight/50 transition">
+          <td class="px-6 py-4">
+            <span class="font-black text-white block">${u.name}</span>
+            <span class="text-xs text-gray-400">${u.email}</span>
+          </td>
+          <td class="px-6 py-4 text-xs font-mono text-gray-300">${u.phone}</td>
+          <td class="px-6 py-4 text-xs text-gray-300">${u.age} y/o • ${u.gender}</td>
+          <td class="px-6 py-4 text-xs font-bold text-gray-200">${u.city}</td>
+          <td class="px-6 py-4">
+            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-kalisi-purple/20 text-kalisi-purple border border-kalisi-purple/30">${u.archetype}</span>
+          </td>
+          <td class="px-6 py-4 text-xs font-bold text-kalisi-gold">${u.bookings_count} Bookings</td>
+          <td class="px-6 py-4">
+            <span class="text-green-400 font-bold text-xs"><i class="fas fa-check-circle mr-1"></i>Verified</span>
+          </td>
+        </tr>
+      `).join('');
+
+      // 3. Events List Table
+      const eventsTbody = document.getElementById('events-tbody');
+      eventsTbody.innerHTML = (data.events || []).map(e => {
+        const isEnabled = e.status === 'open';
+        const isCompleted = e.status === 'completed';
+        const statusBadge = isEnabled
+          ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30 uppercase"><i class="fas fa-circle text-[8px] mr-1"></i>Enabled</span>`
+          : isCompleted
+            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30 uppercase">Completed</span>`
+            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30 uppercase"><i class="fas fa-ban text-[8px] mr-1"></i>Disabled</span>`;
+
+        return `
+          <tr class="hover:bg-kalisi-surfaceLight/50 transition">
+            <td class="px-6 py-4">
+              <span class="font-black text-white block text-sm">${e.title || 'Dinner Meetup'}</span>
+              <span class="text-xs text-kalisi-gold font-bold"><i class="fas fa-map-marker-alt mr-1"></i>${e.city}</span>
+            </td>
+            <td class="px-6 py-4">
+              <span class="font-bold text-gray-200 block text-xs">${e.date_str}</span>
+              <span class="text-[11px] text-gray-400">${e.time_window}</span>
+            </td>
+            <td class="px-6 py-4 max-w-xs">
+              <span class="font-bold text-white block text-xs">${e.venue_name || 'Curated Partner Restaurant'}</span>
+              <span class="text-[11px] text-gray-400 block truncate" title="${e.venue_address || ''}">${e.venue_address || 'Central Location'}</span>
+            </td>
+            <td class="px-6 py-4 font-black text-kalisi-gold">₹${e.price_inr}</td>
+            <td class="px-6 py-4">
+              <div class="flex items-center space-x-2">
+                <span class="font-bold text-white text-xs">${e.bookings_count}</span>
+                <span class="text-gray-400 text-xs">/ ${e.max_capacity}</span>
+              </div>
+            </td>
+            <td class="px-6 py-4">${statusBadge}</td>
+            <td class="px-6 py-4 text-right space-x-2 whitespace-nowrap">
+              <button onclick="openEditEventModal('${e.id}')" class="px-2.5 py-1.5 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-500/40 text-xs font-bold hover:bg-blue-500 hover:text-white transition">
+                <i class="fas fa-pen-to-square mr-1"></i> Edit
+              </button>
+              <button onclick="toggleEventEnable('${e.id}')" class="px-2.5 py-1.5 rounded-lg text-xs font-bold transition ${isEnabled ? 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500 hover:text-white' : 'bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500 hover:text-white'}">
+                <i class="fas ${isEnabled ? 'fa-ban' : 'fa-check'} mr-1"></i> ${isEnabled ? 'Disable' : 'Enable'}
+              </button>
+              <button onclick="viewParticularEventBookings('${e.id}')" class="px-2.5 py-1.5 rounded-lg bg-kalisi-gold/20 text-kalisi-gold border border-kalisi-gold/40 text-xs font-bold hover:bg-kalisi-gold hover:text-black transition">
+                <i class="fas fa-users mr-1"></i> Bookings
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      // 4. Payments Table
+      const paymentsTbody = document.getElementById('payments-tbody');
+      paymentsTbody.innerHTML = (data.bookings || []).map(b => `
+        <tr class="hover:bg-kalisi-surfaceLight/50 transition">
+          <td class="px-6 py-4 text-xs font-mono text-gray-400">${b.id.substring(0, 8)}...</td>
+          <td class="px-6 py-4 font-bold text-white">${b.user_name}</td>
+          <td class="px-6 py-4 text-xs text-gray-300">${b.slot_date} • ${b.slot_city}</td>
+          <td class="px-6 py-4 font-black text-kalisi-gold">₹${b.amount_paid}</td>
+          <td class="px-6 py-4 text-xs font-bold text-gray-300">${b.payment_method}</td>
+          <td class="px-6 py-4">
+            <span class="px-2 py-0.5 rounded text-[11px] font-black ${b.payment_status === 'paid' ? 'bg-green-500/20 text-green-400 border border-green-500/40' : 'bg-gray-500/20 text-gray-400'} uppercase">
+              ${b.payment_status}
+            </span>
+          </td>
+          <td class="px-6 py-4 text-xs text-gray-400">${b.created_at}</td>
+        </tr>
+      `).join('');
+
+      // 5. Videos Grid
+      const videosGrid = document.getElementById('videos-grid');
+      videosGrid.innerHTML = (data.videos || []).map(v => `
+        <div class="glass-card rounded-2xl overflow-hidden border border-kalisi-border group">
+          <div class="h-44 relative bg-cover bg-center" style="background-image: url('${v.thumbnail_url}')">
+            <div class="absolute inset-0 bg-black/40 group-hover:bg-black/20 transition"></div>
+            <a href="${v.video_url}" target="_blank" class="absolute inset-0 flex items-center justify-center">
+              <div class="w-12 h-12 rounded-full bg-white/80 text-black flex items-center justify-center text-xl shadow-lg hover:scale-110 transition">
+                <i class="fas fa-play ml-0.5"></i>
+              </div>
+            </a>
+          </div>
+          <div class="p-4 space-y-2">
+            <h4 class="font-bold text-white text-sm line-clamp-1">${v.title}</h4>
+            <div class="flex items-center justify-between text-xs text-gray-400">
+              <span><i class="fas fa-location-dot text-kalisi-gold mr-1"></i>${v.venue_name}</span>
+              <span><i class="fas fa-eye mr-1"></i>${v.views_count} views</span>
+            </div>
+            <div class="pt-2 border-t border-kalisi-border flex justify-end">
+              <button onclick="handleDeleteVideo('${v.id}')" class="text-xs text-red-400 hover:text-red-300">
+                <i class="fas fa-trash mr-1"></i>Delete Video
+              </button>
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      // 6. Venues Grid
+      const venuesGrid = document.getElementById('venues-grid');
+      venuesGrid.innerHTML = (data.restaurants || []).map(r => `
+        <div class="glass-card p-6 rounded-2xl border border-kalisi-border space-y-4">
+          <div class="flex items-start justify-between">
+            <div>
+              <h3 class="text-lg font-black text-white">${r.name}</h3>
+              <p class="text-xs text-gray-400">${r.neighborhood}, ${r.city}</p>
+            </div>
+            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-kalisi-gold/20 text-kalisi-gold border border-kalisi-gold/30 uppercase">${r.price_tier}</span>
+          </div>
+          <div class="space-y-2 text-xs">
+            <div class="p-2.5 rounded-xl bg-kalisi-surfaceLight/80">
+              <span class="text-gray-400 block font-semibold mb-0.5">Activities:</span>
+              <span class="text-white">${r.activities}</span>
+            </div>
+            <div class="p-2.5 rounded-xl bg-kalisi-surfaceLight/80">
+              <span class="text-gray-400 block font-semibold mb-0.5">Special Features:</span>
+              <span class="text-kalisi-gold font-medium">${r.special_features}</span>
+            </div>
+          </div>
+          <div class="flex items-center justify-between pt-3 border-t border-kalisi-border text-xs text-gray-400">
+            <span><i class="fas fa-clock mr-1"></i>${r.duration_hours}</span>
+            <span><i class="fas fa-phone mr-1"></i>${r.contact_phone}</span>
+          </div>
+        </div>
+      `).join('');
+
+      // Populate Event Dropdown
+      const dropdown = document.getElementById('event-select-dropdown');
+      if (dropdown && data.events && data.events.length > 0) {
+        dropdown.innerHTML = data.events.map(e => `
+          <option value="${e.id}" ${selectedEventId === e.id ? 'selected' : ''}>
+            ${e.title || 'Dinner Event'} • ${e.city} (${e.date_str}) [${e.bookings_count}/${e.max_capacity} booked]
+          </option>
+        `).join('');
+        if (!selectedEventId) {
+          selectedEventId = data.events[0].id;
+        }
+      }
+    }
+
+    // =========================================================================
+    // PARTICULAR EVENT BOOKINGS PAGE LOGIC
+    // =========================================================================
+    function viewParticularEventBookings(eventId) {
+      selectedEventId = eventId;
+      navigateTab('event-bookings', '/admin/event-bookings');
+    }
+
+    function onSelectEventFromDropdown() {
+      const dropdown = document.getElementById('event-select-dropdown');
+      selectedEventId = dropdown.value;
+      renderEventBookingsPage();
+    }
+
+    function renderEventBookingsPage() {
+      if (!globalData || !selectedEventId) return;
+      const event = (globalData.events || []).find(e => e.id === selectedEventId) || (globalData.events || [])[0];
+      if (!event) return;
+
+      selectedEventId = event.id;
+      const dropdown = document.getElementById('event-select-dropdown');
+      if (dropdown) dropdown.value = event.id;
+
+      // Event Banner
+      const banner = document.getElementById('event-detail-banner');
+      banner.innerHTML = `
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div class="flex items-center space-x-3 mb-1">
+              <h3 class="text-xl font-black text-white">${event.title || 'Dinner Meetup'}</h3>
+              <span class="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase ${event.status === 'completed' ? 'bg-blue-500/20 text-blue-400' : event.status === 'open' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">${event.status}</span>
+              <button onclick="openEditEventModal('${event.id}')" class="px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-500/40 text-xs font-bold hover:bg-blue-500 hover:text-white transition">
+                <i class="fas fa-pen-to-square mr-1"></i>Edit Event
+              </button>
+            </div>
+            <p class="text-xs text-gray-300">
+              <span class="text-kalisi-gold font-bold"><i class="fas fa-calendar mr-1"></i>${event.date_str} (${event.time_window})</span> • 
+              <span><i class="fas fa-location-dot mr-1"></i>${event.city}</span> • 
+              <span>Price: <b class="text-kalisi-gold">₹${event.price_inr}</b></span>
+            </p>
+            <p class="text-xs text-gray-400 mt-1">
+              <i class="fas fa-utensils mr-1 text-gray-500"></i><b>Venue:</b> ${event.venue_name || 'Curated Partner Restaurant'} — <span class="text-gray-400">${event.venue_address || 'Central City Location'}</span>
+            </p>
+          </div>
+          <div class="flex items-center space-x-6">
+            <div class="text-center">
+              <span class="text-2xl font-black text-white">${event.bookings_count}</span>
+              <span class="text-xs text-gray-400 block">Members Booked</span>
+            </div>
+            <div class="text-center">
+              <span class="text-2xl font-black text-green-400">${event.seats_left}</span>
+              <span class="text-xs text-gray-400 block">Seats Remaining</span>
+            </div>
+            <div class="text-center">
+              <span class="text-2xl font-black text-kalisi-purple">₹${event.bookings_count * event.price_inr}</span>
+              <span class="text-xs text-gray-400 block">Event Total</span>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // Filter attendees for this particular event
+      const eventAttendees = (globalData.bookings || []).filter(b => b.slot_id === event.id);
+      const tbody = document.getElementById('event-attendees-tbody');
+
+      if (eventAttendees.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="8" class="text-center py-10 text-gray-500 text-sm">
+              <i class="fas fa-ticket text-3xl mb-2 block"></i>
+              No members have booked for this event yet.
+            </td>
+          </tr>
+        `;
+      } else {
+        tbody.innerHTML = eventAttendees.map((b, idx) => `
+          <tr class="hover:bg-kalisi-surfaceLight/50 transition">
+            <td class="px-6 py-4">
+              <div class="flex items-center space-x-3">
+                <span class="w-6 h-6 rounded-full bg-kalisi-gold/20 text-kalisi-gold font-black text-xs flex items-center justify-center">${idx + 1}</span>
+                <div>
+                  <span class="font-bold text-white block">${b.user_name}</span>
+                  <span class="text-xs text-gray-400">${b.user_email}</span>
+                </div>
+              </div>
+            </td>
+            <td class="px-6 py-4 font-mono text-xs text-gray-300">${b.user_phone}</td>
+            <td class="px-6 py-4 text-xs text-gray-300">${b.user_age} y/o • ${b.user_gender}</td>
+            <td class="px-6 py-4">
+              <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-kalisi-purple/20 text-kalisi-purple border border-kalisi-purple/30">${b.user_archetype}</span>
+            </td>
+            <td class="px-6 py-4 text-xs text-gray-300">${b.user_dietary}</td>
+            <td class="px-6 py-4">
+              <span class="font-bold text-kalisi-gold">₹${b.amount_paid}</span>
+              <span class="text-[11px] text-gray-400 block">${b.payment_method}</span>
+            </td>
+            <td class="px-6 py-4">
+              <span class="px-2.5 py-1 rounded-full text-xs font-bold ${b.attendance_confirmed ? 'bg-green-500/20 text-green-400 border border-green-500/40' : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/40'}">
+                ${b.attendance_confirmed ? '✓ Attended' : 'Confirmed (Booked)'}
+              </span>
+            </td>
+            <td class="px-6 py-4 text-right">
+              <button onclick="toggleAttendance('${b.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold ${b.attendance_confirmed ? 'bg-gray-700 text-gray-300 hover:text-white' : 'bg-green-600 text-white hover:bg-green-500'} transition">
+                ${b.attendance_confirmed ? 'Mark Absent' : 'Mark Attended'}
+              </button>
+            </td>
+          </tr>
+        `).join('');
+      }
+    }
+
+    async function toggleAttendance(bookingId) {
+      await fetch(`/admin/api/bookings/${bookingId}/toggle-attendance`, { method: 'POST' });
+      await loadData();
+      renderEventBookingsPage();
+    }
+
+    async function toggleEventEnable(eventId) {
+      await fetch(`/admin/api/events/${eventId}/toggle-enable`, { method: 'POST' });
+      loadData();
+    }
+
+    async function toggleEventStatus(eventId, newStatus) {
+      const formData = new FormData();
+      formData.append('status', newStatus);
+      await fetch(`/admin/api/events/${eventId}/status`, { method: 'POST', body: formData });
+      loadData();
+    }
+
+    async function handleDeleteVideo(videoId) {
+      if (!confirm('Are you sure you want to remove this video?')) return;
+      await fetch(`/admin/api/videos/${videoId}`, { method: 'DELETE' });
+      loadData();
+    }
+
+    function openEditEventModal(eventId) {
+      if (!globalData || !globalData.events) return;
+      const event = globalData.events.find(e => e.id === eventId);
+      if (!event) return;
+
+      document.getElementById('edit-event-id').value = event.id;
+      document.getElementById('edit-title').value = event.title || '';
+      document.getElementById('edit-city').value = event.city || '';
+      document.getElementById('edit-date-str').value = event.date_str || '';
+      document.getElementById('edit-time-window').value = event.time_window || '';
+      document.getElementById('edit-price-inr').value = event.price_inr || 599;
+      document.getElementById('edit-max-capacity').value = event.max_capacity || 10;
+      document.getElementById('edit-status').value = event.status || 'open';
+      document.getElementById('edit-venue-name').value = event.venue_name || '';
+      document.getElementById('edit-venue-address').value = event.venue_address || '';
+      document.getElementById('edit-about-event').value = event.about_event || '';
+      document.getElementById('edit-rules').value = event.rules_and_regulations || '';
+
+      document.getElementById('modal-edit-event').classList.remove('hidden');
+    }
+
+    async function handleUpdateEvent(e) {
+      e.preventDefault();
+      const form = e.target;
+      const eventId = document.getElementById('edit-event-id').value;
+      const data = new FormData(form);
+      const res = await fetch(`/admin/api/events/${eventId}/update`, { method: 'POST', body: data });
+      if (res.ok) {
+        document.getElementById('modal-edit-event').classList.add('hidden');
+        await loadData();
+      } else {
+        alert('Failed to update event. Please check inputs and try again.');
+      }
+    }
+
+    async function handleCreateSlot(e) {
+      e.preventDefault();
+      const form = e.target;
+      const data = new FormData(form);
+      await fetch('/admin/api/slots/create', { method: 'POST', body: data });
+      document.getElementById('modal-new-slot').classList.add('hidden');
+      form.reset();
+      loadData();
+    }
+
+    async function handleCreateVideo(e) {
+      e.preventDefault();
+      const form = e.target;
+      const data = new FormData(form);
+      await fetch('/admin/api/videos/create', { method: 'POST', body: data });
+      document.getElementById('modal-new-video').classList.add('hidden');
+      form.reset();
+      loadData();
+    }
+
+    async function handleCreateVenue(e) {
+      e.preventDefault();
+      const form = e.target;
+      const data = new FormData(form);
+      await fetch('/admin/api/restaurants/create', { method: 'POST', body: data });
+      document.getElementById('modal-new-venue').classList.add('hidden');
+      form.reset();
+      loadData();
+    }
+
     // Initialize Auth & Data on Load
     checkAuth();
   </script>
@@ -1167,24 +1546,6 @@ ADMIN_LOGIN_HTML = """<!DOCTYPE html>
   <title>Kalisi — Admin Mission Control Login</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            kalisi: {
-              bg: '#121212',
-              surface: '#1E1E1E',
-              surfaceLight: '#282828',
-              gold: '#F5A623',
-              crimson: '#D32F2F',
-              border: '#2E2E2E'
-            }
-          }
-        }
-      }
-    }
-  </script>
 </head>
 <body class="min-h-screen bg-[#121212] flex items-center justify-center p-4">
   <div class="bg-[#1E1E1E] max-w-md w-full p-8 rounded-3xl border border-[#2E2E2E] shadow-2xl space-y-6">
@@ -1258,6 +1619,7 @@ ADMIN_LOGIN_HTML = """<!DOCTYPE html>
 def get_admin_page_html(initial_tab: str = "overview") -> str:
     return ADMIN_HTML.replace("checkAuth();", f"checkAuth(); switchTab('{initial_tab}');")
 
+# Dedicated URLs for Admin Pages
 @admin_router.get("/admin/login", response_class=HTMLResponse)
 def admin_login_page():
     return HTMLResponse(content=ADMIN_LOGIN_HTML)
@@ -1270,28 +1632,30 @@ def admin_root():
 def admin_overview():
     return HTMLResponse(content=get_admin_page_html("overview"))
 
-@admin_router.get("/admin/tables", response_class=HTMLResponse)
-def admin_tables():
-    return HTMLResponse(content=get_admin_page_html("tables"))
+@admin_router.get("/admin/users", response_class=HTMLResponse)
+@admin_router.get("/admin/vibe-dna", response_class=HTMLResponse)
+def admin_users():
+    return HTMLResponse(content=get_admin_page_html("users"))
 
+@admin_router.get("/admin/events", response_class=HTMLResponse)
 @admin_router.get("/admin/slots", response_class=HTMLResponse)
-def admin_slots():
-    return HTMLResponse(content=get_admin_page_html("slots"))
+@admin_router.get("/admin/tables", response_class=HTMLResponse)
+def admin_events():
+    return HTMLResponse(content=get_admin_page_html("events"))
 
+@admin_router.get("/admin/event-bookings", response_class=HTMLResponse)
 @admin_router.get("/admin/bookings", response_class=HTMLResponse)
-def admin_bookings():
-    return HTMLResponse(content=get_admin_page_html("bookings"))
-
-@admin_router.get("/admin/venues", response_class=HTMLResponse)
-def admin_venues():
-    return HTMLResponse(content=get_admin_page_html("venues"))
+def admin_event_bookings():
+    return HTMLResponse(content=get_admin_page_html("event-bookings"))
 
 @admin_router.get("/admin/payments", response_class=HTMLResponse)
 def admin_payments():
     return HTMLResponse(content=get_admin_page_html("payments"))
 
-@admin_router.get("/admin/vibe-dna", response_class=HTMLResponse)
-@admin_router.get("/admin/users", response_class=HTMLResponse)
-def admin_users():
-    return HTMLResponse(content=get_admin_page_html("users"))
+@admin_router.get("/admin/videos", response_class=HTMLResponse)
+def admin_videos():
+    return HTMLResponse(content=get_admin_page_html("videos"))
 
+@admin_router.get("/admin/venues", response_class=HTMLResponse)
+def admin_venues():
+    return HTMLResponse(content=get_admin_page_html("venues"))
