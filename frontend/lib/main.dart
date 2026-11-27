@@ -3,9 +3,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'constants/colors.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/main_home_screen.dart';
+import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await NotificationService.initialize();
   final prefs = await SharedPreferences.getInstance();
   // Open MainHomeScreen by default.
   // Only show WelcomeScreen (Get started / Already have an account) if the user explicitly logged out!

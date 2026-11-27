@@ -19,6 +19,7 @@ class User(Base):
     is_phone_verified = Column(Boolean, default=False)
     hashed_password = Column(String, nullable=False)
     city = Column(String, default="Chennai", index=True)
+    fcm_token = Column(String, nullable=True)
     is_verified = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

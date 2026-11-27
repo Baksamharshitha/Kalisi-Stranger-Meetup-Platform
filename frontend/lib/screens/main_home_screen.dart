@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/notification_service.dart';
 import 'onboarding_quiz_screen.dart';
 import 'welcome_screen.dart';
 import 'event_details_screen.dart';
@@ -26,6 +27,8 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   List<dynamic> _bookedList = [];
   List<dynamic> _attendedList = [];
   List<dynamic> _uploadedVideos = [];
+  List<dynamic> _communityVideos = [];
+  bool _notificationsAllowed = false;
 
   final List<String> _availableLocations = [
     'Central Bangalore',
@@ -40,6 +43,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     super.initState();
     _currentTabIndex = widget.initialTabIndex;
     _initUserAndSlots();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkMandatoryNotifications();
+    });
   }
 
   Future<void> _initUserAndSlots() async {
@@ -70,14 +76,163 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     try {
       final bookingsData = await ApiService.instance.getUserBookings();
       final videosData = await ApiService.instance.getUserVideos();
+      final notifStatus = await NotificationService.isPermissionGranted();
       if (mounted) {
         setState(() {
           _bookedList = bookingsData['booked'] ?? [];
           _attendedList = bookingsData['attended'] ?? [];
           _uploadedVideos = videosData['uploaded'] ?? [];
+          _communityVideos = videosData['community'] ?? [];
+          _notificationsAllowed = notifStatus;
         });
       }
     } catch (_) {}
+  }
+
+  Future<void> _checkMandatoryNotifications() async {
+    // Wait for initial screen transition (e.g. from Splash) to finish before prompting
+    await Future.delayed(const Duration(milliseconds: 1200));
+    if (!mounted) return;
+    final granted = await NotificationService.isPermissionGranted();
+    if (mounted) {
+      setState(() => _notificationsAllowed = granted);
+    }
+    if (!granted && mounted) {
+      _showMandatoryNotificationModal();
+    }
+  }
+
+  void _showMandatoryNotificationModal() {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return PopScope(
+          canPop: false,
+          child: StatefulBuilder(
+            builder: (dialogCtx, setDialogState) {
+              return AlertDialog(
+                backgroundColor: const Color(0xFF141414),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  side: const BorderSide(color: Color(0xFFF5A623), width: 1.2),
+                ),
+                contentPadding: const EdgeInsets.all(24),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFFF5A623), width: 1.5),
+                      ),
+                      child: const Icon(
+                        Icons.notifications_active,
+                        color: Color(0xFFF5A623),
+                        size: 32,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Notifications are Mandatory',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Kalisi curates mystery dining with verified strangers. Push notifications are strictly mandatory to receive your secret restaurant address, table reveal, and attendance alerts.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: const Color(0xFF2E2E2E)),
+                      ),
+                      child: const Column(
+                        children: [
+                          _MandatoryFeatureRow(icon: Icons.lock_open, text: 'Secret Restaurant Reveal (Sat 10:00 AM)'),
+                          SizedBox(height: 8),
+                          _MandatoryFeatureRow(icon: Icons.groups, text: 'Table Group & Stranger Matches'),
+                          SizedBox(height: 8),
+                          _MandatoryFeatureRow(icon: Icons.alarm, text: 'T-2 Hours Attendance Confirmation'),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.check_circle, size: 18),
+                        onPressed: () async {
+                          final granted = await NotificationService.requestPermission();
+                          if (granted) {
+                            if (mounted) {
+                              setState(() => _notificationsAllowed = true);
+                            }
+                            if (ctx.mounted) Navigator.pop(ctx);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('✅ Notifications enabled! You will receive table reveals.'),
+                                  backgroundColor: Color(0xFF4CAF50),
+                                ),
+                              );
+                            }
+                          } else {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('⚠️ Push notifications are mandatory to attend Kalisi dinners.'),
+                                  backgroundColor: Color(0xFFD32F2F),
+                                ),
+                              );
+                            }
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFF5A623),
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          elevation: 0,
+                        ),
+                        label: const Text(
+                          'Enable Push Notifications',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _fetchSlots() async {
@@ -466,51 +621,62 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Gold Border Location Pill (e.g., "Central Bangalore")
+                    // Gold Border Location Pill (Compact & Length Decreased)
                     InkWell(
                       onTap: _showLocationPicker,
-                      borderRadius: BorderRadius.circular(28),
+                      borderRadius: BorderRadius.circular(20),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                         decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.6),
-                          borderRadius: BorderRadius.circular(28),
+                          color: const Color(0xFF141414),
+                          borderRadius: BorderRadius.circular(20),
                           border: Border.all(
                             color: const Color(0xFFC89B3C),
-                            width: 1.2,
+                            width: 1.0,
                           ),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(
-                              _selectedLocation,
-                              style: const TextStyle(
-                                color: Color(0xFFE2B755),
-                                fontSize: 20,
-                                fontWeight: FontWeight.w600,
+                            const Icon(
+                              Icons.location_on,
+                              color: Color(0xFFE2B755),
+                              size: 14,
+                            ),
+                            const SizedBox(width: 5),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 160),
+                              child: Text(
+                                _selectedLocation,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xFFE2B755),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 4),
                             const Icon(
                               Icons.keyboard_arrow_down,
                               color: Color(0xFFE2B755),
-                              size: 20,
+                              size: 16,
                             ),
                           ],
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 8),
 
                     // Subtext: "X events available - Book yours now!!"
                     Text(
                       '${_slots.length} events available - Book yours now!!',
                       style: const TextStyle(
                         color: Color(0xFF9E9E9E),
-                        fontSize: 15,
-                        fontWeight: FontWeight.w400,
-                        letterSpacing: 0.2,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.1,
                       ),
                     ),
                   ],
@@ -559,11 +725,11 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                               ).then((_) => _fetchSlots());
                             },
                             child: Container(
-                              margin: const EdgeInsets.only(bottom: 16),
-                              padding: const EdgeInsets.all(20),
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF141414),
-                                borderRadius: BorderRadius.circular(22),
+                                borderRadius: BorderRadius.circular(16),
                                 border: Border.all(
                                   color: slot.isBookedByUser
                                       ? const Color(0xFFF5A623).withValues(alpha: 0.6)
@@ -579,21 +745,26 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
                                       Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                         decoration: BoxDecoration(
                                           color: const Color(0xFF222222),
                                           borderRadius: BorderRadius.circular(8),
                                         ),
                                         child: Row(
                                           children: [
-                                            const Icon(Icons.groups, color: Color(0xFFBA68C8), size: 14),
-                                            const SizedBox(width: 6),
-                                            Text(
-                                              slot.city,
-                                              style: const TextStyle(
-                                                color: Color(0xFFBA68C8),
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w800,
+                                            const Icon(Icons.groups, color: Color(0xFFBA68C8), size: 12),
+                                            const SizedBox(width: 5),
+                                            ConstrainedBox(
+                                              constraints: const BoxConstraints(maxWidth: 140),
+                                              child: Text(
+                                                slot.city,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  color: Color(0xFFBA68C8),
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
                                               ),
                                             ),
                                           ],
@@ -603,64 +774,66 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                                         '₹${slot.priceInr}',
                                         style: const TextStyle(
                                           color: Color(0xFFF5A623),
-                                          fontSize: 19,
+                                          fontSize: 17,
                                           fontWeight: FontWeight.w900,
                                         ),
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 12),
+                                  const SizedBox(height: 8),
 
                                   // Event Name / Title
                                   Text(
                                     slot.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                       color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w900,
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w800,
                                       letterSpacing: -0.2,
                                     ),
                                   ),
-                                  const SizedBox(height: 6),
+                                  const SizedBox(height: 5),
 
                                   // Date & Time
                                   Row(
                                     children: [
-                                      const Icon(Icons.calendar_today, color: Color(0xFFF5A623), size: 13),
-                                      const SizedBox(width: 6),
+                                      const Icon(Icons.calendar_today, color: Color(0xFFF5A623), size: 11),
+                                      const SizedBox(width: 5),
                                       Text(
                                         slot.dateStr,
                                         style: const TextStyle(
                                           color: Colors.white,
-                                          fontSize: 14,
+                                          fontSize: 12,
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      const SizedBox(width: 12),
-                                      const Icon(Icons.access_time, color: Colors.white54, size: 13),
+                                      const SizedBox(width: 10),
+                                      const Icon(Icons.access_time, color: Colors.white54, size: 11),
                                       const SizedBox(width: 4),
                                       Text(
                                         slot.timeWindow,
                                         style: const TextStyle(
                                           color: Colors.white70,
-                                          fontSize: 13,
+                                          fontSize: 12,
                                           fontWeight: FontWeight.w500,
                                         ),
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 6),
+                                  const SizedBox(height: 5),
 
                                   // Spots Left & Venue Preview
                                   Row(
                                     children: [
-                                      const Icon(Icons.event_seat_outlined, color: Colors.white38, size: 13),
+                                      const Icon(Icons.event_seat_outlined, color: Colors.white38, size: 11),
                                       const SizedBox(width: 4),
                                       Text(
                                         '${slot.seatsLeft} spots left',
                                         style: const TextStyle(
                                           color: Colors.white60,
-                                          fontSize: 12,
+                                          fontSize: 11,
                                         ),
                                       ),
                                       const Spacer(),
@@ -668,23 +841,23 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                                         'Tap to view venue & rules',
                                         style: TextStyle(
                                           color: Color(0xFFBA68C8),
-                                          fontSize: 11,
+                                          fontSize: 10.5,
                                           fontWeight: FontWeight.w700,
                                         ),
                                       ),
-                                      const Icon(Icons.chevron_right, color: Color(0xFFBA68C8), size: 14),
+                                      const Icon(Icons.chevron_right, color: Color(0xFFBA68C8), size: 13),
                                     ],
                                   ),
-                                  const SizedBox(height: 14),
+                                  const SizedBox(height: 10),
 
                                   // Action Button
                                   SizedBox(
                                     width: double.infinity,
-                                    height: 46,
+                                    height: 38,
                                     child: ElevatedButton.icon(
                                       icon: Icon(
                                         slot.isBookedByUser ? Icons.check_circle : Icons.arrow_forward,
-                                        size: 16,
+                                        size: 15,
                                       ),
                                       onPressed: () {
                                         Navigator.push(
@@ -700,8 +873,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                                             : const Color(0xFFF5A623),
                                         foregroundColor: slot.isBookedByUser ? const Color(0xFFF5A623) : Colors.black,
                                         elevation: 0,
+                                        padding: const EdgeInsets.symmetric(vertical: 0),
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(23),
+                                          borderRadius: BorderRadius.circular(14),
                                           side: slot.isBookedByUser
                                               ? const BorderSide(color: Color(0xFFF5A623))
                                               : BorderSide.none,
@@ -710,7 +884,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                                       label: Text(
                                         slot.isBookedByUser ? 'Seat Confirmed • View Details' : 'View Event & Book Seat',
                                         style: const TextStyle(
-                                          fontSize: 14,
+                                          fontSize: 13,
                                           fontWeight: FontWeight.w900,
                                         ),
                                       ),
@@ -732,26 +906,39 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   // 2. REELS VIEW
   // ===========================================================================
   Widget _buildReelsView() {
-    final reels = [
+    final defaultReels = [
       {
         'title': 'First 5 Mins vs Last 5 Mins at Kalisi',
         'venue': 'Chamber of Potions, Anna Nagar',
         'views': '14.2K views',
         'image': 'https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80',
+        'video_url': 'https://www.w3schools.com/html/mov_bbb.mp4',
       },
       {
         'title': 'What Happens When 5 Introverts Dine Together?',
         'venue': 'Central Bangalore Meetup',
         'views': '28.5K views',
         'image': 'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=800&q=80',
+        'video_url': 'https://www.w3schools.com/html/mov_bbb.mp4',
       },
       {
         'title': 'The Mystery Menu Taste Test with Strangers',
         'venue': 'The Fatty Bao, Indiranagar',
         'views': '9.8K views',
         'image': 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=800&q=80',
+        'video_url': 'https://www.w3schools.com/html/mov_bbb.mp4',
       },
     ];
+
+    final reels = _communityVideos.isNotEmpty
+        ? _communityVideos.map((v) => {
+            'title': (v['title'] ?? 'Kalisi Table Moment').toString(),
+            'venue': (v['venue_name'] ?? v['venue'] ?? 'Bangalore Stranger Dinner').toString(),
+            'views': '${v['views_count'] ?? 1200} views',
+            'image': ApiService.instance.resolveMediaUrl(v['thumbnail_url']?.toString()),
+            'video_url': ApiService.instance.resolveMediaUrl(v['video_url']?.toString()),
+          }).toList()
+        : defaultReels;
 
     return SafeArea(
       child: Padding(
@@ -759,14 +946,49 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Kalisi Reels',
-              style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w900),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'Real moments & unfiltered laughter from our dinner tables',
-              style: TextStyle(color: Colors.white60, fontSize: 13),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Kalisi Reels',
+                        style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w900),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Real moments & unfiltered laughter from our dinner tables',
+                        style: TextStyle(color: Colors.white60, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                InkWell(
+                  onTap: _showUploadVideoDialog,
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFFF5A623)),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.video_call, color: Color(0xFFF5A623), size: 16),
+                        SizedBox(width: 4),
+                        Text(
+                          'Upload',
+                          style: TextStyle(color: Color(0xFFF5A623), fontSize: 12, fontWeight: FontWeight.w800),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             Expanded(
@@ -939,7 +1161,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   }
 
   // ===========================================================================
-  // 4. PROFILE VIEW (Comprehensive: Bookings, Password, Videos, Policies, Delete)
+  // 4. PROFILE VIEW (Professional Revamp & Styled Menu Rows)
   // ===========================================================================
   Widget _buildProfileView() {
     final userName = ApiService.instance.currentUserName ?? 'Rahul Verma';
@@ -958,44 +1180,79 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                 'Profile & Account',
                 style: TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w900),
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: 16),
 
-              // User Info Card
+              // 1. Professional User Info Header Card
               Container(
-                padding: const EdgeInsets.all(20),
+                padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: const Color(0xFF141414),
                   borderRadius: BorderRadius.circular(22),
-                  border: Border.all(color: const Color(0xFF242424)),
+                  border: Border.all(color: const Color(0xFF262626)),
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1B1B1B), Color(0xFF111111)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
                 ),
                 child: Row(
                   children: [
-                    CircleAvatar(
-                      radius: 30,
-                      backgroundColor: const Color(0xFFF5A623).withValues(alpha: 0.2),
+                    Container(
+                      width: 58,
+                      height: 58,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFFF5A623), width: 1.5),
+                        color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                      ),
+                      alignment: Alignment.center,
                       child: Text(
                         userName.isNotEmpty ? userName[0].toUpperCase() : 'U',
-                        style: const TextStyle(color: Color(0xFFF5A623), fontSize: 24, fontWeight: FontWeight.w900),
+                        style: const TextStyle(
+                          color: Color(0xFFF5A623),
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 16),
+                    const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            userName,
-                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  userName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.verified, color: Color(0xFF4CAF50), size: 16),
+                            ],
                           ),
                           const SizedBox(height: 4),
-                          Text(
-                            'Location: $_selectedLocation',
-                            style: const TextStyle(color: Colors.white60, fontSize: 13),
+                          Row(
+                            children: [
+                              const Icon(Icons.location_on, color: Color(0xFFF5A623), size: 12),
+                              const SizedBox(width: 4),
+                              Text(
+                                _selectedLocation,
+                                style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w500),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 2),
+                          const SizedBox(height: 4),
                           const Text(
-                            'Verified Kalisi Diner • Phone Protected',
-                            style: TextStyle(color: Color(0xFFBA68C8), fontSize: 11, fontWeight: FontWeight.w600),
+                            'Verified Diner • Private Profile',
+                            style: TextStyle(color: Color(0xFFBA68C8), fontSize: 11, fontWeight: FontWeight.w700),
                           ),
                         ],
                       ),
@@ -1003,11 +1260,133 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                   ],
                 ),
               ),
+              const SizedBox(height: 14),
+
+              // 2. Metrics Stat Bar
+              Row(
+                children: [
+                  _buildProfileMetricCard(
+                    'Active Bookings',
+                    '${_bookedList.length}',
+                    Icons.confirmation_number_outlined,
+                    const Color(0xFFF5A623),
+                  ),
+                  const SizedBox(width: 10),
+                  _buildProfileMetricCard(
+                    'Attended Dinners',
+                    '${_attendedList.length}',
+                    Icons.dinner_dining,
+                    const Color(0xFFBA68C8),
+                  ),
+                  const SizedBox(width: 10),
+                  _buildProfileMetricCard(
+                    'Notifications',
+                    _notificationsAllowed ? 'Active ✓' : 'Mandatory ⚠️',
+                    Icons.notifications_active,
+                    _notificationsAllowed ? const Color(0xFF4CAF50) : const Color(0xFFE57373),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // 3. Vibe DNA Archetype Showcase Card
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF141414),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: const Color(0xFFBA68C8).withValues(alpha: 0.35)),
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF22132A), Color(0xFF141414)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.auto_awesome, color: Color(0xFFBA68C8), size: 16),
+                            SizedBox(width: 6),
+                            Text(
+                              'VIBE DNA PERSONA',
+                              style: TextStyle(
+                                color: Color(0xFFBA68C8),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFBA68C8).withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Text(
+                            'Curated Match',
+                            style: TextStyle(color: Color(0xFFBA68C8), fontSize: 10, fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'The Charismatic Spark (Stark)',
+                      style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Quick-witted, infectious energy, and effortlessly turns awkward silences into inside jokes and real connections.',
+                      style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.35),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 20),
 
               // ===============================================================
-              // MY BOOKINGS TILE (Opens dedicated My Bookings screen)
+              // SECTION: PERSONALITY & MATCHMAKING
               // ===============================================================
+              const Text(
+                'Personality & Matchmaking',
+                style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 0.3),
+              ),
+              const SizedBox(height: 10),
+
+              // Retake Vibe DNA Test (Matches the exact pattern of the other lines!)
+              _buildMenuTile(
+                icon: Icons.psychology_outlined,
+                title: 'Retake Vibe DNA Test',
+                subtitle: 'Recalculate your conversational persona & table matches',
+                color: const Color(0xFFBA68C8),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const OnboardingQuizScreen()),
+                  ).then((_) => _loadProfileData());
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              // ===============================================================
+              // SECTION: DINING & ACTIVITY
+              // ===============================================================
+              const Text(
+                'Dining & Experiences',
+                style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 0.3),
+              ),
+              const SizedBox(height: 10),
+
+              // My Bookings Tile
               _buildMenuTile(
                 icon: Icons.confirmation_number_outlined,
                 title: 'My Bookings',
@@ -1020,73 +1399,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                   ).then((_) => _loadProfileData());
                 },
               ),
-              const SizedBox(height: 16),
-
-              // ===============================================================
-              // VIBE DNA ARCHETYPE
-              // ===============================================================
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF141414),
-                  borderRadius: BorderRadius.circular(22),
-                  border: Border.all(color: const Color(0xFFBA68C8).withValues(alpha: 0.4)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.auto_awesome, color: Color(0xFFBA68C8), size: 18),
-                        SizedBox(width: 8),
-                        Text(
-                          'Your Vibe DNA Archetype',
-                          style: TextStyle(color: Color(0xFFBA68C8), fontSize: 13, fontWeight: FontWeight.w800),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'The Charismatic Spark (Stark)',
-                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w900),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Quick-witted, infectious energy, and effortlessly turns awkward silences into inside jokes.',
-                      style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.3),
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => const OnboardingQuizScreen()),
-                          );
-                        },
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFFBA68C8),
-                          side: const BorderSide(color: Color(0xFFBA68C8)),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        ),
-                        child: const Text('Retake 20-Question Vibe DNA Quiz', style: TextStyle(fontWeight: FontWeight.w700)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-
-              // ===============================================================
-              // ACCOUNT & COMMUNITY SETTINGS
-              // ===============================================================
-              const Text(
-                'Settings & Community',
-                style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 10),
 
               // Uploaded Videos Tile
               _buildMenuTile(
@@ -1095,6 +1407,30 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                 subtitle: 'Your dinner highlights & community reels',
                 color: const Color(0xFFF5A623),
                 onTap: _showUploadedVideosModal,
+              ),
+
+              const SizedBox(height: 16),
+
+              // ===============================================================
+              // SECTION: APP SETTINGS & SAFETY
+              // ===============================================================
+              const Text(
+                'Settings & Preferences',
+                style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 0.3),
+              ),
+              const SizedBox(height: 10),
+
+              // Push Notification Permissions (Mandatory)
+              _buildMenuTile(
+                icon: Icons.notifications_active_outlined,
+                title: 'Push Notifications',
+                subtitle: _notificationsAllowed
+                    ? 'Mandatory for dinner reveals • Enabled ✓'
+                    : '⚠️ Mandatory: Tap to allow notifications',
+                color: _notificationsAllowed ? const Color(0xFF4CAF50) : const Color(0xFFF5A623),
+                onTap: () {
+                  _showMandatoryNotificationModal();
+                },
               ),
 
               // How It Works Tile
@@ -1135,12 +1471,12 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
               const SizedBox(height: 24),
 
-              // Sign Out Button (Sets is_logged_out = true and redirects to WelcomeScreen)
+              // Sign Out Button
               SizedBox(
                 width: double.infinity,
-                height: 52,
+                height: 50,
                 child: OutlinedButton.icon(
-                  icon: const Icon(Icons.logout, size: 20),
+                  icon: const Icon(Icons.logout, size: 18),
                   onPressed: () async {
                     final prefs = await SharedPreferences.getInstance();
                     await prefs.setBool('is_logged_out', true);
@@ -1156,15 +1492,55 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                   },
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.redAccent,
-                    side: const BorderSide(color: Colors.redAccent),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                    side: const BorderSide(color: Colors.redAccent, width: 1.2),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   ),
-                  label: const Text('Sign Out of Kalisi', style: TextStyle(fontWeight: FontWeight.w800)),
+                  label: const Text('Sign Out of Kalisi', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
                 ),
               ),
               const SizedBox(height: 30),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileMetricCard(String label, String value, IconData icon, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFF141414),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFF222222)),
+        ),
+        child: Column(
+          children: [
+            Icon(icon, color: color, size: 18),
+            const SizedBox(height: 6),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 13,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1585,6 +1961,29 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
           ],
         );
       },
+    );
+  }
+}
+
+class _MandatoryFeatureRow extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _MandatoryFeatureRow({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, color: const Color(0xFFF5A623), size: 14),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     );
   }
 }

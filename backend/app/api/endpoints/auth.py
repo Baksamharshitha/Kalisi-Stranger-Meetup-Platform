@@ -1,7 +1,11 @@
 import random
 import re
-from typing import Dict
-from fastapi import APIRouter, Depends, HTTPException, status
+import uuid
+import shutil
+from pathlib import Path
+from typing import Dict, Optional
+from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import User, PersonalityProfile, DiningPreferences, Booking, CitySlot, VideoReel
@@ -11,8 +15,9 @@ from app.schemas.auth import (
     ChangePasswordRequest, UploadVideoRequest
 )
 from app.core.security import get_password_hash, verify_password, create_access_token
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_current_user_optional
 from app.api.endpoints.vibe_dna import calculate_archetype
+from app.services.fcm_service import send_fcm_notification, broadcast_fcm_notification
 
 router = APIRouter()
 
@@ -169,7 +174,14 @@ def register(user_in: UserRegister, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=Token)
 def login(user_in: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_in.email).first()
+    clean_id = user_in.email.strip()
+    digits = re.sub(r"\D", "", clean_id)
+    user = db.query(User).filter(
+        (User.email == clean_id) |
+        (User.phone == clean_id) |
+        (User.phone == digits) |
+        (User.phone.like(f"%{digits[-10:]}%") if len(digits) >= 10 else False)
+    ).first()
     if not user or not verify_password(user_in.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
@@ -305,5 +317,104 @@ def upload_video(
         "status": "success",
         "message": "Dinner memory video uploaded successfully!",
         "video_id": video.id
+    }
+
+@router.post("/upload-video-file")
+async def upload_video_file(
+    title: str = Form(...),
+    venue_name: str = Form(...),
+    video_file: UploadFile = File(...),
+    thumbnail_file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    upload_base = Path(__file__).resolve().parent.parent.parent.parent / "backend" / "uploads"
+    safe_name = f"{uuid.uuid4().hex[:10]}_{video_file.filename.replace(' ', '_')}"
+    v_path = upload_base / "videos" / safe_name
+    v_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(v_path, "wb") as buffer:
+        shutil.copyfileobj(video_file.file, buffer)
+    final_video_url = f"/uploads/videos/{safe_name}"
+
+    final_thumb_url = "https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80"
+    if thumbnail_file and thumbnail_file.filename:
+        t_name = f"{uuid.uuid4().hex[:10]}_{thumbnail_file.filename.replace(' ', '_')}"
+        t_path = upload_base / "thumbnails" / t_name
+        t_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(t_path, "wb") as buffer:
+            shutil.copyfileobj(thumbnail_file.file, buffer)
+        final_thumb_url = f"/uploads/thumbnails/{t_name}"
+
+    video = VideoReel(
+        title=title,
+        venue_name=venue_name,
+        video_url=final_video_url,
+        thumbnail_url=final_thumb_url,
+        uploader_user_id=current_user.id,
+        is_approved=True
+    )
+    db.add(video)
+    db.commit()
+    return {
+        "status": "success",
+        "message": "Video reel uploaded successfully!",
+        "video_id": video.id,
+        "video_url": final_video_url
+    }
+
+class RegisterFcmTokenRequest(BaseModel):
+    fcm_token: str
+
+@router.post("/register-fcm-token")
+def register_fcm_token(
+    req: RegisterFcmTokenRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db)
+):
+    if current_user:
+        current_user.fcm_token = req.fcm_token
+        db.commit()
+    return {"status": "success", "message": "FCM device token registered"}
+
+class SendPushNotificationRequest(BaseModel):
+    title: str
+    body: str
+    target_user_id: Optional[str] = None
+
+@router.post("/send-push-notification")
+def send_push_notification(
+    req: SendPushNotificationRequest,
+    db: Session = Depends(get_db)
+):
+    print(f"======================================================")
+    print(f"🔔 KALISI PUSH NOTIFICATION DISPATCH:")
+    print(f"📌 Title: {req.title}")
+    print(f"💬 Body:  {req.body}")
+    print(f"🎯 Target: {req.target_user_id or 'All Registered Users'}")
+    print(f"======================================================")
+
+    if req.target_user_id:
+        target_user = db.query(User).filter(User.id == req.target_user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="Target user not found")
+        if not target_user.fcm_token:
+            return {
+                "status": "warning",
+                "message": f"User {target_user.full_name} does not have an active device FCM token registered.",
+                "sent_count": 0
+            }
+        result = send_fcm_notification(target_user.fcm_token, req.title, req.body)
+        return {
+            "status": "success" if result.get("success") else "failed",
+            "message": f"Push notification dispatched to {target_user.full_name}",
+            "result": result
+        }
+
+    # Broadcast to all users
+    result = broadcast_fcm_notification(db, req.title, req.body)
+    return {
+        "status": "success",
+        "message": f"Broadcast push notification completed. Sent: {result.get('sent_count', 0)}, Failed: {result.get('failed_count', 0)}",
+        "details": result
     }
 

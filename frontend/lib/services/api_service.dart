@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
 class ApiService {
@@ -104,10 +105,26 @@ class ApiService {
     if (token != null && currentUserId != null) return;
     try {
       await loginOrRegister(
-        email: 'user_bangalore@kalisi.app',
-        fullName: 'Rahul Verma',
+        email: 'sathwik.kalisi@gmail.com',
+        fullName: 'Sathwik',
         password: 'kalisi1234',
       );
+    } catch (_) {
+      try {
+        await loginOrRegister(
+          email: 'user_bangalore@kalisi.app',
+          fullName: 'Rahul Verma',
+          password: 'kalisi1234',
+        );
+      } catch (_) {}
+    }
+    // Auto-sync stored FCM push token once authenticated
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final fcm = prefs.getString('fcm_token');
+      if (fcm != null && fcm.isNotEmpty) {
+        await registerFcmToken(fcm);
+      }
     } catch (_) {}
   }
 
@@ -521,5 +538,24 @@ class ApiService {
       final body = jsonDecode(res.body);
       throw Exception(body['detail'] ?? 'Failed to upload video');
     }
+  }
+
+  // 11. Register Firebase FCM Push Token
+  Future<void> registerFcmToken(String fcmToken) async {
+    try {
+      await _post('/auth/register-fcm-token', {'fcm_token': fcmToken});
+    } catch (_) {}
+  }
+
+  // 12. Helper to resolve relative media URLs (e.g. /uploads/videos/...)
+  String resolveMediaUrl(String? urlOrPath) {
+    if (urlOrPath == null || urlOrPath.isEmpty) {
+      return 'https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80';
+    }
+    if (urlOrPath.startsWith('http://') || urlOrPath.startsWith('https://')) {
+      return urlOrPath;
+    }
+    final host = baseUrl.replaceAll('/api', '');
+    return '$host${urlOrPath.startsWith('/') ? '' : '/'}$urlOrPath';
   }
 }

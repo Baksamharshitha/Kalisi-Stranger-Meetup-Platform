@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "626895247967",
+    "project_id": "kalisi-c091e",
+    "storage_bucket": "kalisi-c091e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:626895247967:android:8807346a9dd80ae9aed9ea",
+        "android_client_info": {
+          "package_name": "com.kalisi.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyADCX8wHijIgxlhdxRD2sCR_qihNxtE7Hc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

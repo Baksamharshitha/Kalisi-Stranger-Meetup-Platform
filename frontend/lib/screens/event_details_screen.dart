@@ -269,7 +269,12 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                           children: [
                             Icon(Icons.groups, color: Color(0xFFBA68C8), size: 18),
                             SizedBox(width: 8),
-                            Text('Five strangers matched by conversational chemistry', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                            Expanded(
+                              child: Text(
+                                'Five strangers matched by conversational chemistry',
+                                style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -277,7 +282,12 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                           children: [
                             Icon(Icons.style, color: Color(0xFFBA68C8), size: 18),
                             SizedBox(width: 8),
-                            Text('Table icebreaker question deck to spark laughs', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                            Expanded(
+                              child: Text(
+                                'Table icebreaker question deck to spark laughs',
+                                style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 8),
@@ -285,7 +295,12 @@ class _EventDetailsScreenState extends State<EventDetailsScreen> {
                           children: [
                             Icon(Icons.timer_outlined, color: Color(0xFFBA68C8), size: 18),
                             SizedBox(width: 8),
-                            Text('2.5 hours of relaxed dining & authentic connections', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                            Expanded(
+                              child: Text(
+                                '2.5 hours of relaxed dining & authentic connections',
+                                style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                              ),
+                            ),
                           ],
                         ),
                       ],

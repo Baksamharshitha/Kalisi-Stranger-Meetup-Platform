@@ -1,10 +1,15 @@
+import uuid
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Form, HTTPException, Depends
+from typing import Optional
+from fastapi import APIRouter, Form, HTTPException, Depends, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from app.core.config import settings
 from app.db.database import SessionLocal
 from app.db.models import User, CitySlot, TableGroup, Restaurant, Booking, VideoReel
 from app.services.matchmaking import cluster_slot_into_tables
+from app.services.fcm_service import broadcast_fcm_notification, send_fcm_notification
 
 admin_router = APIRouter()
 
@@ -57,6 +62,7 @@ def admin_get_overview():
                 "dietary": diet,
                 "bookings_count": len(u.bookings),
                 "is_verified": u.is_verified,
+                "fcm_token": getattr(u, "fcm_token", None) or "",
                 "created_at": u.created_at.strftime("%Y-%m-%d %H:%M") if u.created_at else "Recent",
             })
 
@@ -219,24 +225,54 @@ def admin_toggle_attendance(booking_id: str):
         return {"status": "success", "booking_id": booking.id, "attended": booking.attendance_confirmed}
 
 @admin_router.post("/admin/api/videos/create")
-def admin_create_video(
+async def admin_create_video(
     title: str = Form(...),
     venue_name: str = Form(...),
-    video_url: str = Form(...),
-    thumbnail_url: str = Form("https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=800&q=80")
+    video_url: Optional[str] = Form(None),
+    video_file: Optional[UploadFile] = File(None),
+    thumbnail_url: Optional[str] = Form(None),
+    thumbnail_file: Optional[UploadFile] = File(None)
 ):
+    upload_base = Path(__file__).resolve().parent.parent / "uploads"
+    final_video_url = (video_url or "").strip()
+    final_thumbnail_url = (thumbnail_url or "").strip()
+
+    # Save uploaded video file if provided
+    if video_file and video_file.filename:
+        v_ext = Path(video_file.filename).suffix or ".mp4"
+        safe_name = f"{uuid.uuid4().hex[:10]}_{video_file.filename.replace(' ', '_')}"
+        v_path = upload_base / "videos" / safe_name
+        v_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(v_path, "wb") as buffer:
+            shutil.copyfileobj(video_file.file, buffer)
+        final_video_url = f"/uploads/videos/{safe_name}"
+
+    # Save uploaded thumbnail file if provided
+    if thumbnail_file and thumbnail_file.filename:
+        safe_t_name = f"{uuid.uuid4().hex[:10]}_{thumbnail_file.filename.replace(' ', '_')}"
+        t_path = upload_base / "thumbnails" / safe_t_name
+        t_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(t_path, "wb") as buffer:
+            shutil.copyfileobj(thumbnail_file.file, buffer)
+        final_thumbnail_url = f"/uploads/thumbnails/{safe_t_name}"
+
+    if not final_video_url:
+        final_video_url = "https://www.w3schools.com/html/mov_bbb.mp4"
+    if not final_thumbnail_url:
+        final_thumbnail_url = "https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80"
+
     with SessionLocal() as db:
         vr = VideoReel(
             title=title,
             venue_name=venue_name,
-            video_url=video_url,
-            thumbnail_url=thumbnail_url,
-            views_count=1000,
+            video_url=final_video_url,
+            thumbnail_url=final_thumbnail_url,
+            views_count=1200,
             is_approved=True
         )
         db.add(vr)
         db.commit()
-        return {"status": "success", "video_id": vr.id}
+        return {"status": "success", "video_id": vr.id, "video_url": final_video_url, "thumbnail_url": final_thumbnail_url}
 
 @admin_router.delete("/admin/api/videos/{video_id}")
 def admin_delete_video(video_id: str):
@@ -246,6 +282,117 @@ def admin_delete_video(video_id: str):
             db.delete(vr)
             db.commit()
         return {"status": "success"}
+
+@admin_router.post("/admin/api/notifications/send")
+def admin_send_push_notification(
+    title: str = Form(...),
+    body: str = Form(...),
+    target_type: str = Form("broadcast"),
+    city: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    event_id: Optional[str] = Form(None),
+    test_token: Optional[str] = Form(None)
+):
+    with SessionLocal() as db:
+        if target_type == "user":
+            if not user_id:
+                return {"status": "error", "message": "Please select a user to send the push notification."}
+            target_user = db.query(User).filter(User.id == user_id).first()
+            if not target_user:
+                return {"status": "error", "message": f"User not found with ID {user_id}"}
+            
+            token = (test_token or "").strip() or target_user.fcm_token
+            if not token:
+                return {
+                    "status": "warning",
+                    "message": f"User {target_user.full_name} ({target_user.phone}) has not registered an FCM device token yet. Launch the Kalisi mobile app with this account to automatically register the token, or provide a test token.",
+                    "user": {"id": target_user.id, "name": target_user.full_name, "phone": target_user.phone}
+                }
+            
+            res = send_fcm_notification(token=token, title=title, body=body, data={"user_id": target_user.id})
+            if res.get("success"):
+                return {
+                    "status": "success",
+                    "message": f"Push notification successfully delivered to {target_user.full_name} ({target_user.phone})! Firebase Message ID: {res.get('message_id')}",
+                    "details": res
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Firebase FCM delivery failed for {target_user.full_name}: {res.get('error')}",
+                    "details": res
+                }
+
+        elif target_type == "event_booked":
+            if not event_id:
+                return {"status": "error", "message": "Please select an event."}
+            slot = db.query(CitySlot).filter(CitySlot.id == event_id).first()
+            if not slot:
+                return {"status": "error", "message": "Event not found."}
+            
+            bookings = db.query(Booking).filter(Booking.slot_id == event_id).all()
+            if not bookings:
+                return {
+                    "status": "warning",
+                    "message": f"No bookings found for '{slot.title}' ({slot.city}).",
+                    "total_booked": 0
+                }
+            
+            tokens = []
+            users_with_token = []
+            users_pending_token = []
+            for b in bookings:
+                u = b.user
+                if u and u.fcm_token:
+                    tokens.append((u, u.fcm_token))
+                    users_with_token.append(u.full_name)
+                elif u:
+                    users_pending_token.append(f"{u.full_name} ({u.phone})")
+            
+            if not tokens:
+                return {
+                    "status": "warning",
+                    "message": f"Found {len(bookings)} booked member(s) for '{slot.title}', but none have registered a device token yet ({', '.join(users_pending_token)}).",
+                    "total_booked": len(bookings),
+                    "pending_users": users_pending_token
+                }
+            
+            sent_count = 0
+            fail_count = 0
+            errors = []
+            for u, t in tokens:
+                res = send_fcm_notification(token=t, title=title, body=body, data={"slot_id": slot.id, "user_id": u.id})
+                if res.get("success"):
+                    sent_count += 1
+                else:
+                    fail_count += 1
+                    errors.append(res.get("error"))
+            
+            return {
+                "status": "success",
+                "message": f"Event notification dispatched! Delivered to {sent_count}/{len(tokens)} active devices across {len(bookings)} booked members for '{slot.title}'.",
+                "sent_count": sent_count,
+                "total_booked": len(bookings),
+                "pending_count": len(users_pending_token),
+                "errors": errors[:3]
+            }
+
+        elif target_type == "city":
+            target_city = city
+            res = broadcast_fcm_notification(db, title=title, body=body, city=target_city)
+            return {
+                "status": "success",
+                "message": f"City broadcast dispatched to {target_city}! Sent to {res.get('sent_count', 0)} devices (Targets: {res.get('total_targets', 0)}).",
+                "details": res
+            }
+
+        else: # broadcast to all
+            res = broadcast_fcm_notification(db, title=title, body=body)
+            return {
+                "status": "success",
+                "message": f"Broadcast push notification dispatched! Sent to {res.get('sent_count', 0)} devices (Targets: {res.get('total_targets', 0)}).",
+                "details": res
+            }
 
 @admin_router.post("/admin/api/slots/create")
 def admin_create_slot(
@@ -451,6 +598,11 @@ ADMIN_HTML = """<!DOCTYPE html>
           <i class="fas fa-play-circle w-5 text-center"></i>
           <span>Videos & Reels</span>
         </a>
+
+        <a href="/admin/notifications" onclick="return navigateTab('notifications', '/admin/notifications')" id="nav-btn-notifications" class="w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-gray-400 hover:text-white hover:bg-kalisi-surfaceLight transition">
+          <i class="fas fa-bell w-5 text-center text-kalisi-gold"></i>
+          <span>Push Notifications</span>
+        </a>
       </nav>
 
       <!-- Quick Actions -->
@@ -640,7 +792,8 @@ ADMIN_HTML = """<!DOCTYPE html>
                 <th class="px-6 py-4">City</th>
                 <th class="px-6 py-4">Vibe DNA Archetype</th>
                 <th class="px-6 py-4">Bookings</th>
-                <th class="px-6 py-4">Status</th>
+                <th class="px-6 py-4">Status & FCM</th>
+                <th class="px-6 py-4 text-right">Action</th>
               </tr>
             </thead>
             <tbody id="users-tbody" class="divide-y divide-kalisi-border text-gray-300"></tbody>
@@ -783,6 +936,154 @@ ADMIN_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" id="venues-grid">
+      </div>
+    </section>
+
+    <!-- TAB 8: PUSH NOTIFICATIONS -->
+    <section id="tab-notifications" class="hidden space-y-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-2xl font-black text-white flex items-center space-x-2">
+            <i class="fas fa-bell text-kalisi-gold"></i>
+            <span>Firebase Push Notifications</span>
+          </h2>
+          <p class="text-xs text-gray-400">Broadcast alerts, table reveal updates, and reminders directly to connected mobile devices.</p>
+        </div>
+        <div class="flex items-center space-x-2 bg-kalisi-surface px-3 py-1.5 rounded-xl border border-kalisi-border text-xs">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span class="text-gray-300 font-bold">FCM Gateway: Connected</span>
+        </div>
+      </div>
+
+      <!-- Notification Composer & Presets Grid -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Composer Form -->
+        <div class="lg:col-span-2 bg-kalisi-surface rounded-2xl border border-kalisi-border p-6 shadow-xl">
+          <h3 class="text-base font-bold text-white mb-4 flex items-center space-x-2">
+            <i class="fas fa-paper-plane text-kalisi-gold text-sm"></i>
+            <span>Compose Notification</span>
+          </h3>
+          <form id="form-push-notification" onsubmit="return handleSendPushNotification(event)" class="space-y-4">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Target Audience</label>
+              <select name="target_type" id="push-target-type" onchange="togglePushTarget(this.value)" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold">
+                <option value="broadcast">📢 All Users (Broadcast to All Connected Devices)</option>
+                <option value="user">👤 Specific Selected User</option>
+                <option value="event_booked">🎟️ Selected Event Booked Members</option>
+                <option value="city">📍 Filter by Neighborhood / City</option>
+              </select>
+            </div>
+
+            <!-- User Select Wrapper -->
+            <div id="push-user-select-wrapper" class="hidden">
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Select User (By Name or Phone)</label>
+              <select name="user_id" id="push-user-select" onchange="onSelectPushUser(this.value)" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold">
+                <option value="">-- Choose User --</option>
+              </select>
+            </div>
+
+            <!-- Event Select Wrapper -->
+            <div id="push-event-select-wrapper" class="hidden">
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Select Event to Notify Booked Members</label>
+              <select name="event_id" id="push-event-select" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold">
+                <option value="">-- Choose Event --</option>
+              </select>
+            </div>
+
+            <!-- City Select Wrapper -->
+            <div id="push-city-select-wrapper" class="hidden">
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Target Neighborhood</label>
+              <select name="city" id="push-city" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold">
+                <option value="Central Bangalore">Central Bangalore</option>
+                <option value="Indiranagar Bangalore">Indiranagar Bangalore</option>
+                <option value="Koramangala Bangalore">Koramangala Bangalore</option>
+                <option value="Anna Nagar Chennai">Anna Nagar Chennai</option>
+                <option value="South Mumbai">South Mumbai</option>
+              </select>
+            </div>
+
+            <!-- Optional Device FCM Token Override for testing -->
+            <div id="push-test-token-wrapper">
+              <div class="flex items-center justify-between mb-1">
+                <label class="text-[11px] font-bold text-gray-400 uppercase">Device FCM Token (Auto-synced or Manual Test Override)</label>
+                <span id="push-token-status" class="text-[10px]"></span>
+              </div>
+              <input type="text" name="test_token" id="push-test-token" placeholder="Auto-populated when user has an active token, or paste a test token here..." class="w-full bg-kalisi-surfaceLight px-4 py-2 rounded-xl border border-kalisi-border text-xs text-gray-300 font-mono focus:outline-none focus:border-kalisi-gold">
+            </div>
+
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Notification Title</label>
+              <input type="text" name="title" id="push-title" placeholder="e.g. 🎉 Your Secret Venue Address is Revealed!" required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold">
+            </div>
+
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Message Body</label>
+              <textarea name="body" id="push-body" rows="3" placeholder="e.g. Good morning! Your matched table at Lavelle Road is ready. Open Kalisi to see your tablemates." required class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white focus:outline-none focus:border-kalisi-gold"></textarea>
+            </div>
+
+            <button type="submit" id="btn-send-push" class="w-full py-3 rounded-xl bg-kalisi-gold text-black font-black text-sm hover:brightness-110 active:scale-95 transition flex items-center justify-center space-x-2">
+              <i class="fas fa-paper-plane"></i>
+              <span>Send Push Notification to Devices</span>
+            </button>
+          </form>
+          <div id="push-feedback" class="mt-4 hidden p-3 rounded-xl text-xs font-semibold"></div>
+        </div>
+
+        <!-- Quick 1-Click Presets -->
+        <div class="space-y-4">
+          <div class="bg-kalisi-surface rounded-2xl border border-kalisi-border p-5 shadow-xl">
+            <h3 class="text-sm font-bold text-white mb-3 flex items-center space-x-2">
+              <i class="fas fa-bolt text-kalisi-purple"></i>
+              <span>1-Click Event Presets</span>
+            </h3>
+            <div class="space-y-2.5">
+              <button type="button" onclick="applyPushPreset('venue_reveal')" class="w-full text-left p-3 rounded-xl bg-kalisi-surfaceLight hover:bg-kalisi-border border border-kalisi-border transition group">
+                <div class="text-xs font-black text-kalisi-gold group-hover:underline">🎉 Table & Venue Reveal</div>
+                <div class="text-[11px] text-gray-400 mt-1">"Your mystery table is unlocked! Tap to check your restaurant address."</div>
+              </button>
+              <button type="button" onclick="applyPushPreset('anti_ghosting')" class="w-full text-left p-3 rounded-xl bg-kalisi-surfaceLight hover:bg-kalisi-border border border-kalisi-border transition group">
+                <div class="text-xs font-black text-kalisi-purple group-hover:underline">⏰ T-2 Hours Attendance Check</div>
+                <div class="text-[11px] text-gray-400 mt-1">"Dinner starts in 2 hours! Open your ticket to confirm your seat."</div>
+              </button>
+              <button type="button" onclick="applyPushPreset('weekend_open')" class="w-full text-left p-3 rounded-xl bg-kalisi-surfaceLight hover:bg-kalisi-border border border-kalisi-border transition group">
+                <div class="text-xs font-black text-emerald-400 group-hover:underline">✨ Weekend Meetup Slots Live</div>
+                <div class="text-[11px] text-gray-400 mt-1">"Fresh stranger dinner slots are open for booking in your neighborhood!"</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sent Notifications History -->
+      <div class="bg-kalisi-surface rounded-2xl border border-kalisi-border overflow-hidden shadow-xl">
+        <div class="p-5 border-b border-kalisi-border flex items-center justify-between">
+          <h3 class="text-sm font-black text-white">Recent Dispatched Notifications</h3>
+          <span class="text-xs text-gray-500">Live Firebase Delivery Status</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr class="border-b border-kalisi-border bg-kalisi-surfaceLight/50 text-gray-400 font-bold uppercase">
+                <th class="p-3.5">Title</th>
+                <th class="p-3.5">Message Body</th>
+                <th class="p-3.5">Target</th>
+                <th class="p-3.5">Delivered</th>
+                <th class="p-3.5">Time</th>
+                <th class="p-3.5 text-right">Status</th>
+              </tr>
+            </thead>
+            <tbody id="notifications-table-body" class="divide-y divide-kalisi-border text-gray-300">
+              <tr>
+                <td class="p-3.5 font-bold text-white">🎉 Welcome to Kalisi</td>
+                <td class="p-3.5 text-gray-400">Welcome to Kalisi! Your profile is verified and ready for meetups.</td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-blue-900/30 text-blue-400 border border-blue-800/40 text-[10px] font-bold">Broadcast</span></td>
+                <td class="p-3.5 font-bold text-emerald-400">All Devices</td>
+                <td class="p-3.5 text-gray-500">System</td>
+                <td class="p-3.5 text-right"><span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-[10px]">Delivered</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -958,7 +1259,7 @@ ADMIN_HTML = """<!DOCTYPE html>
         <h3 class="text-lg font-black text-white">Add New Video Reel</h3>
         <button onclick="document.getElementById('modal-new-video').classList.add('hidden')" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
       </div>
-      <form onsubmit="handleCreateVideo(event)" class="space-y-4">
+      <form onsubmit="handleCreateVideo(event)" class="space-y-4" enctype="multipart/form-data">
         <div>
           <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Video Title</label>
           <input type="text" name="title" required placeholder="e.g. When 5 Introverts Dine Together" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
@@ -967,15 +1268,36 @@ ADMIN_HTML = """<!DOCTYPE html>
           <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Venue / Event</label>
           <input type="text" name="venue_name" required placeholder="e.g. Central Bangalore Meetup" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
         </div>
-        <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Video MP4 URL</label>
-          <input type="url" name="video_url" required value="https://www.w3schools.com/html/mov_bbb.mp4" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+
+        <!-- Video File Upload & URL -->
+        <div class="p-3.5 bg-kalisi-surfaceLight/80 rounded-2xl border border-kalisi-border space-y-2.5">
+          <label class="block text-xs font-bold text-kalisi-gold uppercase flex items-center justify-between">
+            <span class="flex items-center gap-1.5"><i class="fas fa-video"></i> Upload Video File</span>
+            <span class="text-[10px] text-gray-400 font-normal">MP4, WebM, MOV</span>
+          </label>
+          <input type="file" name="video_file" id="admin-video-file-input" accept="video/*" class="w-full text-xs text-gray-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-kalisi-gold file:text-black hover:file:brightness-110 cursor-pointer">
+          <div class="flex items-center gap-2 pt-1">
+            <div class="h-px bg-kalisi-border flex-1"></div>
+            <span class="text-[10px] text-gray-500 uppercase font-bold">OR External URL</span>
+            <div class="h-px bg-kalisi-border flex-1"></div>
+          </div>
+          <input type="url" name="video_url" placeholder="https://... (Optional if file is selected above)" class="w-full bg-kalisi-surface px-3 py-2 rounded-xl border border-kalisi-border text-xs text-white">
         </div>
-        <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Thumbnail Image URL</label>
-          <input type="url" name="thumbnail_url" value="https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80" class="w-full bg-kalisi-surfaceLight px-4 py-2.5 rounded-xl border border-kalisi-border text-sm text-white">
+
+        <!-- Thumbnail Upload & URL -->
+        <div class="p-3.5 bg-kalisi-surfaceLight/80 rounded-2xl border border-kalisi-border space-y-2.5">
+          <label class="block text-xs font-bold text-kalisi-purple uppercase flex items-center justify-between">
+            <span class="flex items-center gap-1.5"><i class="fas fa-image"></i> Thumbnail Image</span>
+            <span class="text-[10px] text-gray-400 font-normal">JPG, PNG, WebP</span>
+          </label>
+          <input type="file" name="thumbnail_file" accept="image/*" class="w-full text-xs text-gray-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-kalisi-purple file:text-white hover:file:brightness-110 cursor-pointer">
+          <input type="url" name="thumbnail_url" placeholder="https://... (Optional preview image URL)" value="https://images.unsplash.com/photo-1543007630-9710e4a00a20?auto=format&fit=crop&w=800&q=80" class="w-full bg-kalisi-surface px-3 py-2 rounded-xl border border-kalisi-border text-xs text-white">
         </div>
-        <button type="submit" class="w-full py-3 rounded-xl bg-kalisi-purple text-white font-extrabold text-sm hover:brightness-110 transition mt-2">Publish Video Reel</button>
+
+        <button type="submit" id="btn-submit-video" class="w-full py-3 rounded-xl bg-kalisi-purple text-white font-extrabold text-sm hover:brightness-110 active:scale-95 transition flex items-center justify-center space-x-2">
+          <i class="fas fa-upload mr-1.5"></i>
+          <span>Upload & Publish Video Reel</span>
+        </button>
       </form>
     </div>
   </div>
@@ -1070,6 +1392,7 @@ ADMIN_HTML = """<!DOCTYPE html>
       else if (path.includes('/payments')) switchTab('payments');
       else if (path.includes('/videos')) switchTab('videos');
       else if (path.includes('/venues')) switchTab('venues');
+      else if (path.includes('/notifications')) switchTab('notifications');
       else switchTab('overview');
     }
 
@@ -1078,7 +1401,7 @@ ADMIN_HTML = """<!DOCTYPE html>
     };
 
     function switchTab(tabId) {
-      const tabs = ['overview', 'users', 'events', 'event-bookings', 'payments', 'videos', 'venues'];
+      const tabs = ['overview', 'users', 'events', 'event-bookings', 'payments', 'videos', 'venues', 'notifications'];
       tabs.forEach(t => {
         const el = document.getElementById('tab-' + t);
         const btn = document.getElementById('nav-btn-' + t);
@@ -1177,7 +1500,12 @@ ADMIN_HTML = """<!DOCTYPE html>
 
       // 2. Users Directory Table
       const usersTbody = document.getElementById('users-tbody');
-      usersTbody.innerHTML = (data.users || []).map(u => `
+      usersTbody.innerHTML = (data.users || []).map(u => {
+        const hasToken = !!u.fcm_token;
+        const fcmBadge = hasToken 
+          ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 inline-flex items-center"><i class="fas fa-bell mr-1"></i>FCM Active</span>`
+          : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-500/20 text-gray-400 border border-gray-600/30 inline-flex items-center">No Token</span>`;
+        return `
         <tr class="hover:bg-kalisi-surfaceLight/50 transition">
           <td class="px-6 py-4">
             <span class="font-black text-white block">${u.name}</span>
@@ -1190,11 +1518,17 @@ ADMIN_HTML = """<!DOCTYPE html>
             <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-kalisi-purple/20 text-kalisi-purple border border-kalisi-purple/30">${u.archetype}</span>
           </td>
           <td class="px-6 py-4 text-xs font-bold text-kalisi-gold">${u.bookings_count} Bookings</td>
-          <td class="px-6 py-4">
-            <span class="text-green-400 font-bold text-xs"><i class="fas fa-check-circle mr-1"></i>Verified</span>
+          <td class="px-6 py-4 space-y-1">
+            <div><span class="text-green-400 font-bold text-xs"><i class="fas fa-check-circle mr-1"></i>Verified</span></div>
+            <div>${fcmBadge}</div>
+          </td>
+          <td class="px-6 py-4 text-right">
+            <button onclick="quickPushToUser('${u.id}', '${u.name}')" title="Send push notification to this user" class="px-2.5 py-1 rounded-lg bg-kalisi-gold/20 text-kalisi-gold border border-kalisi-gold/40 text-xs font-bold hover:bg-kalisi-gold hover:text-black transition">
+              <i class="fas fa-paper-plane mr-1"></i> Push
+            </button>
           </td>
         </tr>
-      `).join('');
+      `}).join('');
 
       // 3. Events List Table
       const eventsTbody = document.getElementById('events-tbody');
@@ -1328,6 +1662,23 @@ ADMIN_HTML = """<!DOCTYPE html>
         if (!selectedEventId) {
           selectedEventId = data.events[0].id;
         }
+      }
+
+      // Populate Push Notification User Dropdown
+      const pushUserSelect = document.getElementById('push-user-select');
+      if (pushUserSelect && data.users) {
+        pushUserSelect.innerHTML = '<option value="">-- Choose User to Notify --</option>' + data.users.map(u => {
+          const fcmBadge = u.fcm_token ? '🟢 [FCM Token Active]' : '⚪ [No Token Yet]';
+          return `<option value="${u.id}">${u.name} (${u.phone || 'No phone'}) — ${u.city || ''} ${fcmBadge}</option>`;
+        }).join('');
+      }
+
+      // Populate Push Notification Event Dropdown
+      const pushEventSelect = document.getElementById('push-event-select');
+      if (pushEventSelect && data.events) {
+        pushEventSelect.innerHTML = '<option value="">-- Choose Event to Notify Booked Members --</option>' + data.events.map(e => `
+          <option value="${e.id}">${e.title || 'Dinner Meetup'} • ${e.city} (${e.date_str}) — [${e.bookings_count} Booked]</option>
+        `).join('');
       }
     }
 
@@ -1514,11 +1865,31 @@ ADMIN_HTML = """<!DOCTYPE html>
     async function handleCreateVideo(e) {
       e.preventDefault();
       const form = e.target;
-      const data = new FormData(form);
-      await fetch('/admin/api/videos/create', { method: 'POST', body: data });
-      document.getElementById('modal-new-video').classList.add('hidden');
-      form.reset();
-      loadData();
+      const btn = document.getElementById('btn-submit-video');
+      const oldHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Uploading & Publishing Video Reel...';
+      }
+
+      try {
+        const data = new FormData(form);
+        const res = await fetch('/admin/api/videos/create', { method: 'POST', body: data });
+        if (res.ok) {
+          document.getElementById('modal-new-video').classList.add('hidden');
+          form.reset();
+          await loadData();
+        } else {
+          alert('Failed to upload video. Please ensure the file is a valid video format.');
+        }
+      } catch (err) {
+        alert('Upload error: ' + err);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = oldHtml;
+        }
+      }
     }
 
     async function handleCreateVenue(e) {
@@ -1529,6 +1900,153 @@ ADMIN_HTML = """<!DOCTYPE html>
       document.getElementById('modal-new-venue').classList.add('hidden');
       form.reset();
       loadData();
+    }
+
+    function togglePushTarget(val) {
+      document.getElementById('push-city-select-wrapper').classList.add('hidden');
+      document.getElementById('push-user-select-wrapper').classList.add('hidden');
+      document.getElementById('push-event-select-wrapper').classList.add('hidden');
+
+      if (val === 'city') {
+        document.getElementById('push-city-select-wrapper').classList.remove('hidden');
+      } else if (val === 'user') {
+        document.getElementById('push-user-select-wrapper').classList.remove('hidden');
+      } else if (val === 'event_booked') {
+        document.getElementById('push-event-select-wrapper').classList.remove('hidden');
+      }
+    }
+
+    function onSelectPushUser(userId) {
+      const tokenInput = document.getElementById('push-test-token');
+      const tokenStatus = document.getElementById('push-token-status');
+      if (!userId || !globalData || !globalData.users) {
+        if (tokenInput) tokenInput.value = '';
+        if (tokenStatus) tokenStatus.innerHTML = '';
+        return;
+      }
+      const u = globalData.users.find(x => x.id === userId);
+      if (u && u.fcm_token) {
+        if (tokenInput) tokenInput.value = u.fcm_token;
+        if (tokenStatus) tokenStatus.innerHTML = '<span class="text-emerald-400 font-bold">✓ Active Device FCM Token</span>';
+      } else {
+        if (tokenInput) tokenInput.value = '';
+        if (tokenStatus) tokenStatus.innerHTML = '<span class="text-amber-400 font-bold">⚠️ No Token (Open app or supply test token)</span>';
+      }
+    }
+
+    function quickPushToUser(userId, userName) {
+      navigateTab('notifications', '/admin/notifications');
+      const targetSelect = document.getElementById('push-target-type');
+      if (targetSelect) {
+        targetSelect.value = 'user';
+        togglePushTarget('user');
+      }
+      const userSelect = document.getElementById('push-user-select');
+      if (userSelect) {
+        userSelect.value = userId;
+        onSelectPushUser(userId);
+      }
+      const titleInput = document.getElementById('push-title');
+      if (titleInput) {
+        titleInput.value = `Hey ${userName}! 👋`;
+        document.getElementById('push-body').focus();
+      }
+    }
+
+    function applyPushPreset(preset) {
+      const titleInput = document.getElementById('push-title');
+      const bodyInput = document.getElementById('push-body');
+      if (preset === 'venue_reveal') {
+        titleInput.value = '🎉 Table & Venue Revealed!';
+        bodyInput.value = 'Good morning! Your mystery dinner table and partner restaurant address are now unlocked. Open Kalisi to view your matched group!';
+      } else if (preset === 'anti_ghosting') {
+        titleInput.value = '⏰ 2 Hours Until Dinner! Please Confirm';
+        bodyInput.value = 'Your dinner meetup begins in 2 hours! Open your ticket to confirm your arrival with your 5 tablemates.';
+      } else if (preset === 'weekend_open') {
+        titleInput.value = '✨ New Weekend Stranger Dinners Open!';
+        bodyInput.value = 'Curated stranger dinner slots for this weekend are live in your neighborhood. Book your seat before slots fill up!';
+      }
+    }
+
+    async function handleSendPushNotification(e) {
+      e.preventDefault();
+      const form = e.target;
+      const btn = document.getElementById('btn-send-push');
+      const feedback = document.getElementById('push-feedback');
+      const oldBtnHtml = btn.innerHTML;
+
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Dispatching via Firebase FCM...';
+      feedback.classList.add('hidden');
+
+      const data = new FormData(form);
+      const title = data.get('title');
+      const body = data.get('body');
+      const targetType = data.get('target_type');
+      const city = data.get('city');
+      const userId = data.get('user_id');
+      const eventId = data.get('event_id');
+
+      let targetLabel = 'Broadcast (All)';
+      if (targetType === 'user') {
+        const u = (globalData?.users || []).find(x => x.id === userId);
+        targetLabel = u ? `User: ${u.name}` : 'Selected User';
+      } else if (targetType === 'event_booked') {
+        const ev = (globalData?.events || []).find(x => x.id === eventId);
+        targetLabel = ev ? `Event: ${ev.title || 'Meetup'}` : 'Event Attendees';
+      } else if (targetType === 'city') {
+        targetLabel = `City: ${city}`;
+      }
+
+      try {
+        const res = await fetch('/admin/api/notifications/send', {
+          method: 'POST',
+          body: data
+        });
+        const resJson = await res.json();
+        
+        if (resJson.status === 'success') {
+          feedback.className = 'mt-4 p-3 rounded-xl text-xs font-semibold bg-emerald-900/40 border border-emerald-500/50 text-emerald-300';
+          feedback.innerHTML = `✅ <b>Success:</b> ${resJson.message || 'Notification dispatched!'}`;
+        } else if (resJson.status === 'warning') {
+          feedback.className = 'mt-4 p-3 rounded-xl text-xs font-semibold bg-amber-900/40 border border-amber-500/50 text-amber-300';
+          feedback.innerHTML = `⚠️ <b>Notice:</b> ${resJson.message || 'Notice occurred during delivery.'}`;
+        } else {
+          feedback.className = 'mt-4 p-3 rounded-xl text-xs font-semibold bg-red-900/40 border border-red-500/50 text-red-300';
+          feedback.innerHTML = `❌ <b>Error:</b> ${resJson.message || 'Failed to dispatch notification.'}`;
+        }
+        feedback.classList.remove('hidden');
+
+        // Add to history table
+        const tbody = document.getElementById('notifications-table-body');
+        const isSuccess = resJson.status === 'success';
+        const isWarning = resJson.status === 'warning';
+        const statusBadge = isSuccess 
+          ? '<span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-[10px]">Delivered</span>'
+          : isWarning
+            ? '<span class="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-bold text-[10px]">Pending Token</span>'
+            : '<span class="px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 font-bold text-[10px]">Failed</span>';
+
+        const newRow = document.createElement('tr');
+        newRow.className = isSuccess ? 'bg-emerald-950/20' : (isWarning ? 'bg-amber-950/20' : 'bg-red-950/20');
+        newRow.innerHTML = `
+          <td class="p-3.5 font-bold text-white">${title}</td>
+          <td class="p-3.5 text-gray-300">${body}</td>
+          <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 text-[10px] font-bold">${targetLabel}</span></td>
+          <td class="p-3.5 font-bold ${isSuccess ? 'text-emerald-400' : 'text-amber-400'}">Firebase FCM</td>
+          <td class="p-3.5 text-gray-400">Just now</td>
+          <td class="p-3.5 text-right">${statusBadge}</td>
+        `;
+        if (tbody) tbody.insertBefore(newRow, tbody.firstChild);
+
+      } catch (err) {
+        feedback.className = 'mt-4 p-3 rounded-xl text-xs font-semibold bg-red-900/40 border border-red-500/50 text-red-300';
+        feedback.innerHTML = `❌ <b>Error:</b> Failed to reach server. Please check server logs.`;
+        feedback.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = oldBtnHtml;
+      }
     }
 
     // Initialize Auth & Data on Load
@@ -1659,3 +2177,7 @@ def admin_videos():
 @admin_router.get("/admin/venues", response_class=HTMLResponse)
 def admin_venues():
     return HTMLResponse(content=get_admin_page_html("venues"))
+
+@admin_router.get("/admin/notifications", response_class=HTMLResponse)
+def admin_notifications():
+    return HTMLResponse(content=get_admin_page_html("notifications"))

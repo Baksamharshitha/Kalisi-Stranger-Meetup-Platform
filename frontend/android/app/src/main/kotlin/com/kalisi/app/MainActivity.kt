@@ -1,4 +1,4 @@
-package com.kalisi.kalisi_frontend
+package com.kalisi.app
 
 import io.flutter.embedding.android.FlutterActivity
 

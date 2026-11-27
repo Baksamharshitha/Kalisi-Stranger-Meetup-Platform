@@ -1,4 +1,6 @@
+from pathlib import Path
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.core.config import settings
@@ -14,11 +16,19 @@ Base.metadata.create_all(bind=engine)
 with SessionLocal() as db:
     seed_database(db)
 
+# Ensure upload directories exist
+UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+(UPLOAD_DIR / "videos").mkdir(parents=True, exist_ok=True)
+(UPLOAD_DIR / "thumbnails").mkdir(parents=True, exist_ok=True)
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     docs_url=f"{settings.API_V1_STR}/docs"
 )
+
+# Static file serving for uploaded video files and thumbnails
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # CORS middleware for Flutter web/mobile development
 app.add_middleware(
